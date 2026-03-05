@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claudefairy"
+version = "2.0.0"
+description = "ClaudeFairy — Telegram-driven Autonomous AI Assistant Daemon"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+keywords = ["ai", "claude", "telegram", "autonomous", "assistant", "agent"]
+dependencies = [
+    "claude-code-sdk>=0.0.14",
+    "python-telegram-bot>=20.0",
+    "httpx>=0.27.0",
+    "aiosqlite>=0.20.0",
+    "tomli>=2.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+claudefairy = "claudefairy.__main__:main"
+cf = "claudefairy.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claudefairy"]
+
+[tool.hatch.envs.default]
+python = "3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

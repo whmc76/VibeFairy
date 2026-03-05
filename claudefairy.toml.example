@@ -1,0 +1,87 @@
+# ClaudeFairy V2 — 配置模板（不含任何真实密钥）
+# 复制为 claudefairy.toml 后填入真实配置（claudefairy.toml 已在 .gitignore）
+# 所有密钥必须通过 .env 文件或环境变量传入，不得写在此文件中
+
+[daemon]
+# 日志级别: debug / info / warning / error
+log_level = "info"
+# 日志文件目录（相对路径或绝对路径）
+log_dir = "data/logs"
+# 数据库路径
+db_path = "data/claudefairy.db"
+# 每轮 Scout 间隔（秒）
+scout_interval_secs = 3600
+# 每日日报时间（24h 格式，本地时区）
+daily_report_time = "09:00"
+
+[targets]
+# 管理的项目列表，每个条目是一个 [[targets.projects]] 块
+[[targets.projects]]
+name = "HydraMatrix"
+path = "E:/WorkSpace/HydraMatrix"
+description = "Rust-based Agent OS"
+# 是否允许写操作（需要额外的 /approve 审批）
+allow_write = true
+# 是否作为主要分析目标
+primary = true
+
+[budget]
+# 每日 token 上限（0 = 无限制）
+daily_token_limit = 500_000
+# 单任务 token 上限
+per_task_token_limit = 50_000
+# 来源抓取 QPS
+source_fetch_qps = 2
+# 429/503 自动退避
+source_fetch_backoff = true
+# 超限降级模式: "report_only" / "pause" / "alert_only"
+over_budget_mode = "report_only"
+
+[scout]
+# 最低星标数（GitHub Search 结果）
+min_stars_search = 100
+# 最低星标数（GitHub Trending）
+min_stars_trending = 50
+# L2 快评最低分数阈值（0-10）
+l2_min_score = 6.0
+# L3 深度分析最低分数阈值（触发立即通知）
+l3_notify_score = 8.0
+# 感兴趣的语言
+languages = ["rust", "python", "typescript", "go"]
+# 感兴趣的关键词（用于 title/description 过滤）
+keywords = [
+    "agent", "llm", "ai", "async", "tokio",
+    "orchestrator", "workflow", "scheduler",
+]
+
+[retry]
+max_retries = 3
+backoff_base_secs = 30
+backoff_max_secs = 300
+# 可重试的错误类型
+transient_errors = ["rate_limit", "timeout", "connection_error"]
+
+[lock]
+# 目标锁 TTL（分钟）
+ttl_minutes = 60
+
+[approval]
+# 审批 TTL（分钟）
+default_ttl_minutes = 30
+
+[triage]
+# 分拣最大重试次数（超出则标记为 failed）
+max_retries = 3
+# 分拣使用的模型（只读操作，复用 Claude Code SDK）
+model = "claude-sonnet-4-6"
+# 每次分拣 Claude 调用超时（秒）
+timeout_secs = 60
+# 调度器扫描未处理任务的间隔（秒）
+queue_scan_interval_secs = 60
+
+[notification]
+# 静默时段起始（本地时间 HH:MM）。静默时段内仅 P0 任务会立即通知。
+quiet_hours_start = "23:00"
+# 静默时段结束（本地时间 HH:MM）
+quiet_hours_end = "08:00"
+# 注: 日报固定时间发送，不受静默时段影响
