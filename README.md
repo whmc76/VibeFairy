@@ -1,19 +1,19 @@
-# ClaudeFairy
+# VibeFairy
 
 > Telegram 驱动的自主 AI 助手守护进程 — 每条消息都是一个被追踪的任务。
 >
 > A Telegram-driven autonomous AI assistant daemon — every message becomes a tracked task.
 
-ClaudeFairy 把你的 Telegram 与 Claude Code 连接起来。发一条消息，它自动分类、生成方案、等你确认后执行，最后回报结果。
+VibeFairy 把你的 Telegram 与 AI 编码模型连接起来。发一条消息，它自动分类、生成方案、等你确认后执行，最后回报结果。
 
-ClaudeFairy connects your Telegram to Claude Code. Send a message, and it automatically classifies, plans, and executes — with your approval.
+VibeFairy connects your Telegram to coding models. Send a message, and it automatically classifies, plans, and executes — with your approval.
 
 ---
 
 ## 工作原理 / How It Works
 
 ```
-你 (Telegram) → ClaudeFairy → Claude Code (claude-code-sdk)
+你 (Telegram) → VibeFairy → 主模型 / Review 模型
                      ↓
        自动分拣: note（备忘）/ question（问答）/ action（执行）
                      ↓（仅 action 类）
@@ -23,7 +23,7 @@ ClaudeFairy connects your Telegram to Claude Code. Send a message, and it automa
 ```
 
 ```
-You (Telegram) → ClaudeFairy → Claude Code (claude-code-sdk)
+You (Telegram) → VibeFairy → Main model / Review model
                      ↓
          Auto-triage: note / question / action
                      ↓ (action only)
@@ -44,6 +44,8 @@ You (Telegram) → ClaudeFairy → Claude Code (claude-code-sdk)
 - **静默时段** — 夜间只通知 P0 紧急任务
 - **GUI 启动器** — 一键启动，内置项目目录选择器
 - **任意项目** — 可指向任何代码库，不限于固定项目
+- **主模型 / Review 模型可分离** — 可为主执行模型与方案审查模型分别配置 provider 与 model
+- **跨 provider 组合** — 支持 `claude code`、`codex`、`gemini`、`kimi`、`minimax` 的任意主/审查搭配（CLI provider 可通过命令模板接入）
 
 ---
 
@@ -55,6 +57,8 @@ You (Telegram) → ClaudeFairy → Claude Code (claude-code-sdk)
 - **Quiet hours** — silence non-P0 notifications at night
 - **GUI launcher** — one-click start with project directory picker
 - **Any project** — point it at any codebase, not just one fixed repo
+- **Split main/review models** — choose different providers/models for execution and plan review
+- **Cross-provider pairing** — mix `claude code`, `codex`, `gemini`, `kimi`, and `minimax`
 
 ---
 
@@ -70,8 +74,8 @@ You (Telegram) → ClaudeFairy → Claude Code (claude-code-sdk)
 ### 安装 / Install
 
 ```bash
-git clone https://github.com/whmc76/ClaudeFairy.git
-cd ClaudeFairy
+git clone <your-repo-url>
+cd VibeFairy
 pip install -e .
 ```
 
@@ -82,9 +86,9 @@ cp .env.example .env
 # 编辑 .env，填入 Telegram Bot Token 和允许的聊天 ID
 # Edit .env — fill in your Telegram bot token and allowed chat IDs
 
-cp claudefairy.toml.example claudefairy.toml
-# 编辑 claudefairy.toml，在 [[targets.projects]] 中设置你的项目路径
-# Edit claudefairy.toml — set your project path in [[targets.projects]]
+cp vibefairy.toml.example vibefairy.toml
+# 编辑 vibefairy.toml，在 [[targets.projects]] 中设置你的项目路径
+# Edit vibefairy.toml — set your project path in [[targets.projects]]
 ```
 
 `.env` 示例 / example:
@@ -98,20 +102,20 @@ ANTHROPIC_API_KEY=your_anthropic_key_here
 
 **GUI（推荐 / Recommended）：**
 
-双击 `启动ClaudeFairy.bat`（Windows）— 打开启动器，选择项目目录后点击「启动」。
+双击 `启动VibeFairy.bat`（Windows）— 打开启动器，选择项目目录后点击「启动」。
 
-Double-click `启动ClaudeFairy.bat` (Windows) — opens a launcher window, pick your project directory and click Start.
+Double-click `启动VibeFairy.bat` (Windows) — opens a launcher window, pick your project directory and click Start.
 
 **命令行 / CLI：**
 ```bash
-claudefairy run
+vibefairy run
 # 或 / or
-cf run
+vf run
 ```
 
 **验证配置 / Check config：**
 ```bash
-cf check
+vf check
 ```
 
 ---
@@ -145,14 +149,16 @@ You can also tap the inline buttons on the plan card — no need to remember any
 
 ## 配置说明 / Configuration
 
-详见 [`claudefairy.toml.example`](claudefairy.toml.example)：
+详见 [`vibefairy.toml.example`](vibefairy.toml.example)：
 
 | 配置节 / Section | 说明 / Description |
 |-----------------|-------------------|
 | `[daemon]` | 日志、数据库路径、日报时间 / Log, DB path, daily report time |
 | `[targets]` | 管理的项目列表 / Projects to manage |
 | `[budget]` | 每日 / 单任务 token 上限 / Daily & per-task token limits |
-| `[triage]` | 分拣模型、超时、重试 / Triage model, timeout, retries |
+| `[triage]` | 分拣覆盖模型、超时、重试 / Triage override model, timeout, retries |
+| `[models.main]` | 主模型 provider / model / command template |
+| `[models.review]` | Review 模型 provider / model / command template |
 | `[notification]` | 静默时段 / Quiet hours |
 
 ---
@@ -160,7 +166,7 @@ You can also tap the inline buttons on the plan card — no need to remember any
 ## 项目结构 / Architecture
 
 ```
-src/claudefairy/
+src/vibefairy/
 ├── __main__.py          CLI 入口 / Entry point
 ├── daemon.py            主循环 + 调度器 / Main loop + scheduler
 ├── agents/
@@ -176,6 +182,7 @@ src/claudefairy/
 │   └── secrets.py       .env 密钥加载 / Secret loader
 ├── engine/
 │   ├── claude_session.py Claude Code SDK 封装 / SDK wrapper
+│   ├── model_session.py  多 provider 会话工厂 / Multi-provider session factory
 │   ├── worker.py        改进执行器 / Improvement worker
 │   ├── policy.py        安全策略 / Safety policy
 │   └── scheduler.py     定时任务 / Scheduler wrapper
@@ -191,11 +198,12 @@ src/claudefairy/
 
 - 所有任务执行前必须经过 Telegram 按钮明确授权 / All executions require explicit Telegram button approval
 - 仅白名单聊天 ID 可与 Bot 交互 / Only whitelisted chat IDs can interact with the bot
-- Claude Code 以本地用户权限运行，执行前请仔细审阅方案 / Claude Code runs with local user permissions — review plans before approving
-- 密钥只存在于 `.env`，绝不写入配置文件 / Secrets in `.env` only, never in `claudefairy.toml`
+- 主模型 CLI 以本地用户权限运行，执行前请仔细审阅方案 / The main model CLI runs with local user permissions — review plans before approving
+- 密钥只存在于 `.env`，绝不写入配置文件 / Secrets in `.env` only, never in `vibefairy.toml`
 
 ---
 
 ## License
 
 MIT
+

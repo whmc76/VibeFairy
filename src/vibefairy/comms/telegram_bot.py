@@ -46,15 +46,15 @@ from telegram.ext import (
 
 import aiosqlite
 
-from claudefairy.config.loader import DaemonConfig
-from claudefairy.config.secrets import Secrets
-from claudefairy.memory import repo
-from claudefairy.memory.models import Approval, Improvement, Task
+from vibefairy.config.loader import DaemonConfig
+from vibefairy.config.secrets import Secrets
+from vibefairy.memory import repo
+from vibefairy.memory.models import Approval, Improvement, Task
 
 if TYPE_CHECKING:
-    from claudefairy.engine.policy import PolicyEngine
-    from claudefairy.engine.worker import Worker
-    from claudefairy.agents.triage import TriageAgent
+    from vibefairy.engine.policy import PolicyEngine
+    from vibefairy.engine.worker import Worker
+    from vibefairy.agents.triage import TriageAgent
 
 logger = logging.getLogger(__name__)
 
@@ -126,14 +126,43 @@ class TelegramBot:
     async def send_message(self, chat_id: str, text: str, parse_mode: str = "HTML") -> None:
         if self._app is None:
             return
-        try:
-            await self._app.bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode=parse_mode,
-            )
-        except Exception as e:
-            logger.warning("Failed to send Telegram message to %s: %s", chat_id, e)
+        for attempt in range(3):
+            try:
+                await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode=parse_mode,
+                )
+                return
+            except Exception as e:
+                if attempt < 2:
+                    await asyncio.sleep(2 * (attempt + 1))
+                else:
+                    logger.warning("send_message failed after 3 attempts to %s: %s", chat_id, e)
+
+    async def _safe_reply(self, message, text: str, **kwargs) -> None:
+        """带重试的 reply_text（关键通知路径，用户无法主动重试）。"""
+        for attempt in range(3):
+            try:
+                await message.reply_text(text, **kwargs)
+                return
+            except Exception as e:
+                if attempt < 2:
+                    await asyncio.sleep(2 * (attempt + 1))
+                else:
+                    logger.warning("reply_text failed after 3 attempts: %s", e)
+
+    async def _safe_edit(self, query, text: str, **kwargs) -> None:
+        """带重试的 edit_message_text（关键通知路径，用户无法主动重试）。"""
+        for attempt in range(3):
+            try:
+                await query.edit_message_text(text, **kwargs)
+                return
+            except Exception as e:
+                if attempt < 2:
+                    await asyncio.sleep(2 * (attempt + 1))
+                else:
+                    logger.warning("edit_message_text failed after 3 attempts: %s", e)
 
     async def broadcast(self, text: str, parse_mode: str = "HTML") -> None:
         for cid in self._secrets.allowed_chat_ids:
@@ -208,8 +237,9 @@ class TelegramBot:
             await self._triage_fn(task_id)
         except Exception as e:
             logger.exception("Inline triage failed for task #%d", task_id)
-            await update.message.reply_text(
-                f"Task #{task_id} 分析失败: {e}\n系统将自动重试。"
+            await self._safe_reply(
+                update.message,
+                f"Task #{task_id} 分析失败: {e}\n系统将自动重试。",
             )
             return
 
@@ -218,14 +248,16 @@ class TelegramBot:
             return
 
         if task.status == "noted":
-            await update.message.reply_text(
-                f"Task #{task_id} — 已记录备忘\n{task.summary or ''}"
+            await self._safe_reply(
+                update.message,
+                f"Task #{task_id} — 已记录备忘\n{task.summary or ''}",
             )
 
         elif task.status == "answered":
             answer = task.answer or "(无回答)"
-            await update.message.reply_text(
-                f"Task #{task_id} — 回答\n\n{answer[:3800]}"
+            await self._safe_reply(
+                update.message,
+                f"Task #{task_id} — 回答\n\n{answer[:3800]}",
             )
 
         elif task.status == "awaiting_user_decision":
@@ -233,8 +265,9 @@ class TelegramBot:
 
         else:
             # Triage failed or unexpected status
-            await update.message.reply_text(
-                f"Task #{task_id} 分析结果: {task.status}"
+            await self._safe_reply(
+                update.message,
+                f"Task #{task_id} 分析结果: {task.status}",
             )
 
     async def _send_decision_card(self, reply_fn, task: Task) -> None:
@@ -345,7 +378,8 @@ class TelegramBot:
             approval_id=approval_id,
         )
 
-        await query.edit_message_text(
+        await self._safe_edit(
+            query,
             f"Task #{task_id} 已批准，开始执行...\n"
             f"Improvement #{imp_id} | Approval #{approval_id}",
         )
@@ -356,8 +390,8 @@ class TelegramBot:
         )
 
     async def _execute_task(self, query, task_id: int, imp: Improvement, approval_id: int) -> None:
-        from claudefairy.engine.policy import ExecutionMode
-        from claudefairy.engine.worker import WorkerTask
+        from vibefairy.engine.policy import ExecutionMode
+        from vibefairy.engine.worker import WorkerTask
 
         await repo.update_task(self._db, task_id, status="executing")
 
@@ -377,7 +411,8 @@ class TelegramBot:
                 run_id=result.run_id,
                 execute_retries=0,
             )
-            await query.message.reply_text(
+            await self._safe_reply(
+                query.message,
                 f"<b>Task #{task_id} 执行{'完成' if result.success else '失败'}</b>\n"
                 f"状态: {status} | Tokens: {result.token_count:,} | 耗时: {result.duration_secs:.1f}s\n\n"
                 f"<code>{summary}</code>",
@@ -390,8 +425,9 @@ class TelegramBot:
                 status="failed",
                 last_error=str(e),
             )
-            await query.message.reply_text(
-                f"Task #{task_id} 执行出错: {e}"
+            await self._safe_reply(
+                query.message,
+                f"Task #{task_id} 执行出错: {e}",
             )
 
     async def _callback_rework_task(self, query, task_id: int) -> None:
@@ -431,7 +467,7 @@ class TelegramBot:
         if not await self._auth_check(update):
             return
         text = (
-            "<b>ClaudeFairy V2</b> — 消息即任务\n\n"
+            "<b>VibeFairy</b> — 消息即任务\n\n"
             "直接发送任何消息 → 自动创建任务并分析\n\n"
             "<b>任务命令:</b>\n"
             "/list — 活跃任务看板\n"
@@ -584,8 +620,8 @@ class TelegramBot:
     async def _execute_task_text(
         self, task_id: int, task: Task, imp: Improvement, approval_id: int, update: Update
     ) -> None:
-        from claudefairy.engine.policy import ExecutionMode
-        from claudefairy.engine.worker import WorkerTask
+        from vibefairy.engine.policy import ExecutionMode
+        from vibefairy.engine.worker import WorkerTask
 
         await repo.update_task(self._db, task_id, status="executing")
         worker_task = WorkerTask(
@@ -599,7 +635,8 @@ class TelegramBot:
             status = "done" if result.success else "failed"
             summary = result.output[:500] if result.output else "(no output)"
             await repo.update_task(self._db, task_id, status=status, run_id=result.run_id)
-            await update.message.reply_text(
+            await self._safe_reply(
+                update.message,
                 f"<b>Task #{task_id} 执行{'完成' if result.success else '失败'}</b>\n"
                 f"状态: {status} | Tokens: {result.token_count:,} | 耗时: {result.duration_secs:.1f}s\n\n"
                 f"<code>{summary}</code>",
@@ -608,7 +645,7 @@ class TelegramBot:
         except Exception as e:
             logger.exception("Text-command execution failed for task #%d", task_id)
             await repo.update_task(self._db, task_id, status="failed", last_error=str(e))
-            await update.message.reply_text(f"Task #{task_id} 执行出错: {e}")
+            await self._safe_reply(update.message, f"Task #{task_id} 执行出错: {e}")
 
     async def _cmd_approve_imp(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Approve an IMPROVEMENT by improvement_id (Scout pipeline, backward compat)."""
@@ -655,8 +692,8 @@ class TelegramBot:
         asyncio.create_task(self._execute_improvement(update, imp, approval_id))
 
     async def _execute_improvement(self, update: Update, imp: Improvement, approval_id: int) -> None:
-        from claudefairy.engine.policy import ExecutionMode
-        from claudefairy.engine.worker import WorkerTask
+        from vibefairy.engine.policy import ExecutionMode
+        from vibefairy.engine.worker import WorkerTask
 
         task = WorkerTask(
             improvement=imp,
@@ -843,10 +880,17 @@ class TelegramBot:
         dead_letter_imps = await repo.list_improvements(self._db, status="dead_letter", limit=3)
 
         lines = [
-            "<b>ClaudeFairy 状态</b>",
+            "<b>VibeFairy 状态</b>",
             f"运行时间: {uptime_str}",
             f"预算: {today_tokens:,}/{daily_limit:,} tokens ({budget_pct:.1f}%)",
             f"预算模式: {self._cfg.budget.over_budget_mode}",
+            f"主模型: {self._cfg.models.main.provider} / {self._cfg.models.main.model or 'default'}",
+            (
+                f"Review 模型: {self._cfg.models.review.provider} / "
+                f"{self._cfg.models.review.model or 'default'}"
+                if self._cfg.models.review.enabled
+                else "Review 模型: disabled"
+            ),
             "",
             "<b>任务看板</b>",
             f"  待分拣: {received}",
@@ -904,3 +948,4 @@ class TelegramBot:
     def _primary_target_name(self) -> str | None:
         t = self._primary_target()
         return t.name if t else None
+

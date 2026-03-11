@@ -25,13 +25,13 @@ from pathlib import Path
 
 import aiosqlite
 
-from claudefairy.config.loader import DaemonConfig, load_config
-from claudefairy.config.secrets import SecretsError, load_secrets
-from claudefairy.engine.policy import ExecutionMode, PolicyEngine
-from claudefairy.engine.scheduler import Scheduler
-from claudefairy.engine.worker import Worker
-from claudefairy.memory import repo
-from claudefairy.memory.db import open_db
+from vibefairy.config.loader import DaemonConfig, load_config
+from vibefairy.config.secrets import SecretsError, load_secrets
+from vibefairy.engine.policy import ExecutionMode, PolicyEngine
+from vibefairy.engine.scheduler import Scheduler
+from vibefairy.engine.worker import Worker
+from vibefairy.memory import repo
+from vibefairy.memory.db import open_db
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def _setup_logging(cfg: DaemonConfig) -> None:
 
     # File handler (rotating)
     file_handler = logging.handlers.RotatingFileHandler(
-        log_dir / "claudefairy.jsonl",
+        log_dir / "vibefairy.jsonl",
         maxBytes=10 * 1024 * 1024,  # 10 MB
         backupCount=5,
         encoding="utf-8",
@@ -174,7 +174,7 @@ async def _generate_daily_report(
     dead_letter = await repo.list_improvements(db, status="dead_letter", limit=5)
 
     lines = [
-        f"<b>ClaudeFairy 日报 — {today.strftime('%Y-%m-%d')}</b>",
+        f"<b>VibeFairy 日报 — {today.strftime('%Y-%m-%d')}</b>",
         "",
         f"<b>任务看板:</b> 待分拣 {received_queue} | 待确认 {awaiting_decision} | 执行中 {executing} | 今日完成 {len(done_today)}",
         f"<b>预算:</b> {today_tokens:,}/{daily_limit:,} tokens ({pct:.1f}%)",
@@ -221,7 +221,7 @@ async def run_daemon(
 
     # 2. Setup logging
     _setup_logging(cfg)
-    logger.info("ClaudeFairy V2 starting up...")
+    logger.info("VibeFairy starting up...")
 
     # 3. Load secrets (fail fast)
     try:
@@ -237,22 +237,26 @@ async def run_daemon(
     logger.info("Database opened: %s", cfg.db_path)
 
     # 5. Build subsystems
+    from vibefairy.engine.resilience import init_claude_semaphore
+    init_claude_semaphore(cfg.retry.claude_max_concurrent)
+    logger.info("Claude semaphore initialized (max_concurrent=%d)", cfg.retry.claude_max_concurrent)
+
     policy = PolicyEngine(cfg=cfg, db=db)
     worker = Worker(cfg=cfg, secrets=secrets, db=db, policy=policy)
 
     # Import bot here (avoids circular imports at module level)
-    from claudefairy.comms.telegram_bot import TelegramBot
+    from vibefairy.comms.telegram_bot import TelegramBot
     bot = TelegramBot(cfg=cfg, secrets=secrets, db=db, policy=policy, worker=worker)
 
     # 6. Crash recovery (before bot.start so we can send notification)
     await _crash_recovery(db, bot=None)  # bot not started yet, skip notification
 
     # 7. Build agents
-    from claudefairy.agents.scout import Scout
-    from claudefairy.agents.analyst import Analyst
-    from claudefairy.agents.advisor import Advisor
-    from claudefairy.agents.runner import Runner
-    from claudefairy.agents.triage import TriageAgent
+    from vibefairy.agents.scout import Scout
+    from vibefairy.agents.analyst import Analyst
+    from vibefairy.agents.advisor import Advisor
+    from vibefairy.agents.runner import Runner
+    from vibefairy.agents.triage import TriageAgent
 
     scout = Scout(cfg=cfg, secrets=secrets, db=db)
     analyst = Analyst(cfg=cfg, secrets=secrets, db=db)
@@ -313,12 +317,12 @@ async def run_daemon(
     logger.info("Scheduler started")
 
     # Log startup event
-    await repo.log_event(db, "daemon_start", source="daemon", detail="ClaudeFairy V2 started")
+    await repo.log_event(db, "daemon_start", source="daemon", detail="VibeFairy started")
 
     # Send startup notification to all chats
     target_names = [t.name for t in cfg.targets]
     await bot.broadcast(
-        f"ClaudeFairy V2 online.\n"
+        f"VibeFairy online.\n"
         f"Targets: {', '.join(target_names) if target_names else 'none'}\n"
         f"Scout interval: {cfg.scout_interval_secs}s\n"
         f"Daily report: {cfg.daily_report_time}"
@@ -350,4 +354,5 @@ async def run_daemon(
     await bot.stop()
     await repo.log_event(db, "daemon_stop", source="daemon", detail="graceful shutdown")
     await db.close()
-    logger.info("ClaudeFairy V2 stopped.")
+    logger.info("VibeFairy stopped.")
+

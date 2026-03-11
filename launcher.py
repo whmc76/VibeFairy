@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-ClaudeFairy V2 — GUI 启动器
+VibeFairy — GUI 启动器
 
 双击即用，风格与矩阵信使一致。
-支持在 GUI 里切换任意项目目录，启动前自动写入 claudefairy.toml。
+支持在 GUI 里切换任意项目目录，启动前自动写入 vibefairy.toml。
 
 依赖: 仅 Python 标准库 (tkinter, subprocess, threading, queue, tomllib)
 """
@@ -35,10 +35,10 @@ except ImportError:
 
 # ── 路径 ─────────────────────────────────────────────────────────────────────
 PROJECT_DIR = Path(__file__).parent.resolve()
-PYTHON      = sys.executable
-CLAUDEFAIRY   = [PYTHON, "-m", "claudefairy", "run"]
-TOML_PATH   = PROJECT_DIR / "claudefairy.toml"
-TOML_EXAMPLE= PROJECT_DIR / "claudefairy.toml.example"
+PYTHON = sys.executable
+APP_COMMAND = [PYTHON, "-m", "vibefairy", "run"]
+TOML_PATH = PROJECT_DIR / "vibefairy.toml"
+TOML_EXAMPLE = PROJECT_DIR / "vibefairy.toml.example"
 
 # ── 颜色 ─────────────────────────────────────────────────────────────────────
 GREEN  = "#4CAF50"
@@ -67,10 +67,17 @@ def _acquire_single_instance() -> bool:
 # ── TOML 读写 ─────────────────────────────────────────────────────────────────
 
 def _read_toml() -> dict:
-    """读取 claudefairy.toml，失败时返回空 dict。"""
+    """读取 vibefairy.toml，失败时返回空 dict。"""
     if tomllib is None:
         return {}
-    src = TOML_PATH if TOML_PATH.exists() else TOML_EXAMPLE
+    src = next(
+        (
+            candidate for candidate in
+            (TOML_PATH, TOML_EXAMPLE)
+            if candidate.exists()
+        ),
+        TOML_PATH,
+    )
     if not src.exists():
         return {}
     try:
@@ -90,7 +97,7 @@ def _current_target_path() -> str:
 
 
 def _write_target_toml(target_path: str) -> None:
-    """把选择的目录写入 claudefairy.toml 的 targets 部分。
+    """把选择的目录写入 vibefairy.toml 的 targets 部分。
 
     策略：读取现有 toml（或 example），只替换 [[targets.projects]] 块，
     其余设置（budget/scout/retry/triage/notification 等）保持不变。
@@ -107,7 +114,7 @@ def _write_target_toml(target_path: str) -> None:
         {
             "name":        name,
             "path":        path_str,
-            "description": f"Claude Code 工作目录: {name}",
+            "description": f"AI 工作目录: {name}",
             "allow_write": True,
             "primary":     True,
         }
@@ -135,7 +142,7 @@ def _patch_toml_targets(toml_path: Path, name: str, path_str: str) -> None:
         "[[targets.projects]]\n"
         f'name = "{name}"\n'
         f'path = "{path_str}"\n'
-        f'description = "Claude Code 工作目录: {name}"\n'
+        f'description = "AI 工作目录: {name}"\n'
         "allow_write = true\n"
         "primary = true\n"
     )
@@ -159,7 +166,7 @@ def _minimal_toml() -> str:
 [daemon]
 log_level = "info"
 log_dir = "data/logs"
-db_path = "data/claudefairy.db"
+db_path = "data/vibefairy.db"
 scout_interval_secs = 3600
 daily_report_time = "09:00"
 
@@ -182,6 +189,16 @@ model = "claude-sonnet-4-6"
 timeout_secs = 60
 queue_scan_interval_secs = 60
 
+[models.main]
+provider = "claude_code"
+model = "claude-sonnet-4-6"
+timeout_secs = 300
+
+[models.review]
+enabled = false
+provider = "codex"
+timeout_secs = 120
+
 [notification]
 quiet_hours_start = "23:00"
 quiet_hours_end = "08:00"
@@ -191,7 +208,7 @@ quiet_hours_end = "08:00"
 # ── DaemonRunner ──────────────────────────────────────────────────────────────
 
 class DaemonRunner:
-    """管理 ClaudeFairy daemon 子进程，把日志推进 log_queue。"""
+    """管理 VibeFairy daemon 子进程，把日志推进 log_queue。"""
 
     def __init__(self, log_queue: queue.Queue, status_cb):
         self._log_queue  = log_queue
@@ -263,19 +280,19 @@ class DaemonRunner:
             _write_target_toml(target_path)
             self._log(f"[配置] 工作目录已设为: {target_path}")
         except Exception as e:
-            self._log(f"[错误] 无法写入 claudefairy.toml: {e}")
+            self._log(f"[错误] 无法写入 vibefairy.toml: {e}")
             return False
 
         (PROJECT_DIR / "data" / "logs").mkdir(parents=True, exist_ok=True)
 
-        self._log("正在启动 ClaudeFairy daemon...")
+        self._log("正在启动 VibeFairy daemon...")
         self._bot_ok   = None
         self._sched_ok = None
         self._push_status()
 
         try:
             self._proc = subprocess.Popen(
-                CLAUDEFAIRY,
+                APP_COMMAND,
                 cwd=str(PROJECT_DIR),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -313,12 +330,12 @@ class DaemonRunner:
         return self._running
 
 
-# ── ClaudeFairyApp (GUI) ────────────────────────────────────────────────────────
+# ── VibeFairyApp (GUI) ────────────────────────────────────────────────────────
 
-class ClaudeFairyApp(tk.Tk):
+class VibeFairyApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("ClaudeFairy V2  ·  AI 守护进程")
+        self.title("VibeFairy  ·  AI 守护进程")
         self.resizable(True, True)
         self.minsize(560, 420)
         self.configure(bg="#1a1a2e")
@@ -342,7 +359,7 @@ class ClaudeFairyApp(tk.Tk):
         title_bar = tk.Frame(self, bg="#1a1a2e", pady=8)
         title_bar.pack(fill=tk.X)
         tk.Label(
-            title_bar, text="ClaudeFairy V2  ·  AI 守护进程",
+            title_bar, text="VibeFairy  ·  AI 守护进程",
             bg="#1a1a2e", fg="#e0e0e0", font=("Segoe UI", 12, "bold"),
         ).pack()
         tk.Label(
@@ -452,7 +469,7 @@ class ClaudeFairyApp(tk.Tk):
         current = self._workdir_var.get()
         initial = current if Path(current).is_dir() else str(Path.home())
         chosen = filedialog.askdirectory(
-            title="选择 Claude Code 工作目录（项目根目录）",
+            title="选择主工作目录（项目根目录）",
             initialdir=initial,
             mustexist=True,
         )
@@ -522,7 +539,7 @@ class ClaudeFairyApp(tk.Tk):
         state = tk.DISABLED if running else tk.NORMAL
         self._dir_entry.config(state=state)
         self._browse_btn.config(state=state)
-        self.title("ClaudeFairy V2  ·  " + ("运行中" if running else "已停止"))
+        self.title("VibeFairy  ·  " + ("运行中" if running else "已停止"))
 
     # ── 控制 ──────────────────────────────────────────────────────────────
 
@@ -535,10 +552,10 @@ class ClaudeFairyApp(tk.Tk):
     def _start_daemon(self) -> None:
         target = self._workdir_var.get().strip()
         if not target:
-            messagebox.showwarning("ClaudeFairy", "请先选择项目目录")
+            messagebox.showwarning("VibeFairy", "请先选择项目目录")
             return
         if not Path(target).is_dir():
-            messagebox.showerror("ClaudeFairy", f"目录不存在:\n{target}")
+            messagebox.showerror("VibeFairy", f"目录不存在:\n{target}")
             return
 
         self._toggle_btn.config(state=tk.DISABLED)
@@ -580,16 +597,17 @@ def main() -> None:
         root = tk.Tk()
         root.withdraw()
         messagebox.showerror(
-            "ClaudeFairy",
-            "ClaudeFairy 启动器已在运行中！\n\n请先关闭已打开的窗口，再重新启动。"
+            "VibeFairy",
+            "VibeFairy 启动器已在运行中！\n\n请先关闭已打开的窗口，再重新启动。"
         )
         root.destroy()
         return
 
-    app = ClaudeFairyApp()
+    app = VibeFairyApp()
     app.after(300, app._start_daemon)
     app.mainloop()
 
 
 if __name__ == "__main__":
     main()
+

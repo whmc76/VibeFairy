@@ -1,8 +1,8 @@
-"""Config loader — reads claudefairy.toml + .env.
+"""Config loader — reads vibefairy.toml + .env.
 
 Responsibilities:
 - Load .env via python-dotenv (populates os.environ BEFORE secrets.py)
-- Parse claudefairy.toml (tomli) into a typed DaemonConfig
+- Parse vibefairy.toml (tomli) into a typed DaemonConfig
 - Provide sane defaults for optional fields
 """
 
@@ -56,12 +56,17 @@ class RetryConfig:
     transient_errors: list[str] = field(
         default_factory=lambda: ["rate_limit", "timeout", "connection_error"]
     )
+    # Claude session 内层并发 + 重试配置
+    claude_max_concurrent: int = 2
+    claude_inner_retries: int = 3
+    claude_inner_backoff_base: float = 5.0
+    claude_inner_backoff_max: float = 60.0
 
 
 @dataclass
 class TriageConfig:
     max_retries: int = 3              # max triage retries before marking failed
-    model: str = "claude-sonnet-4-6"  # model used for triage (readonly)
+    model: str | None = None          # optional override; defaults to main model
     timeout_secs: int = 60            # timeout per triage Claude call
     queue_scan_interval_secs: int = 60  # how often scheduler scans for unclaimed tasks
 
@@ -74,10 +79,41 @@ class NotificationConfig:
 
 
 @dataclass
+class ModelEndpointConfig:
+    enabled: bool = True
+    provider: str = "claude_code"
+    model: str | None = None
+    timeout_secs: int = 120
+    command: str | None = None
+    readonly_command: list[str] = field(default_factory=list)
+    write_command: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ModelConfig:
+    main: ModelEndpointConfig = field(
+        default_factory=lambda: ModelEndpointConfig(
+            provider="claude_code",
+            model="claude-sonnet-4-6",
+            timeout_secs=300,
+        )
+    )
+    review: ModelEndpointConfig = field(
+        default_factory=lambda: ModelEndpointConfig(
+            enabled=False,
+            provider="codex",
+            model=None,
+            timeout_secs=120,
+            command="codex",
+        )
+    )
+
+
+@dataclass
 class DaemonConfig:
     log_level: str = "info"
     log_dir: str = "data/logs"
-    db_path: str = "data/claudefairy.db"
+    db_path: str = "data/vibefairy.db"
     scout_interval_secs: int = 3600
     daily_report_time: str = "09:00"
     targets: list[TargetProject] = field(default_factory=list)
@@ -86,15 +122,32 @@ class DaemonConfig:
     retry: RetryConfig = field(default_factory=RetryConfig)
     triage: TriageConfig = field(default_factory=TriageConfig)
     notification: NotificationConfig = field(default_factory=NotificationConfig)
+    models: ModelConfig = field(default_factory=ModelConfig)
     lock_ttl_minutes: int = 60
     approval_default_ttl_minutes: int = 30
+
+
+def _load_model_endpoint(
+    raw: dict,
+    *,
+    defaults: ModelEndpointConfig,
+) -> ModelEndpointConfig:
+    return ModelEndpointConfig(
+        enabled=raw.get("enabled", defaults.enabled),
+        provider=raw.get("provider", defaults.provider),
+        model=raw.get("model", defaults.model),
+        timeout_secs=raw.get("timeout_secs", defaults.timeout_secs),
+        command=raw.get("command", defaults.command),
+        readonly_command=list(raw.get("readonly_command", defaults.readonly_command)),
+        write_command=list(raw.get("write_command", defaults.write_command)),
+    )
 
 
 def load_config(
     config_path: Path | None = None,
     env_path: Path | None = None,
 ) -> DaemonConfig:
-    """Load .env (into os.environ) then parse claudefairy.toml."""
+    """Load .env (into os.environ) then parse vibefairy.toml."""
 
     # 1. Load .env first so secrets are available
     env_file = env_path or Path(".env")
@@ -102,12 +155,14 @@ def load_config(
         load_dotenv(env_file, override=False)
 
     # 2. Find config file
-    toml_path = config_path or Path("claudefairy.toml")
-    if not toml_path.exists():
-        # Fall back to looking next to the package root
-        candidate = Path(__file__).parent.parent.parent.parent / "claudefairy.toml"
-        if candidate.exists():
-            toml_path = candidate
+    if config_path is not None:
+        toml_path = config_path
+    else:
+        candidates = [
+            Path("vibefairy.toml"),
+            Path(__file__).parent.parent.parent.parent / "vibefairy.toml",
+        ]
+        toml_path = next((candidate for candidate in candidates if candidate.exists()), Path("vibefairy.toml"))
 
     if not toml_path.exists():
         return DaemonConfig()  # all defaults
@@ -119,7 +174,7 @@ def load_config(
     cfg = DaemonConfig(
         log_level=daemon_raw.get("log_level", "info"),
         log_dir=daemon_raw.get("log_dir", "data/logs"),
-        db_path=daemon_raw.get("db_path", "data/claudefairy.db"),
+        db_path=daemon_raw.get("db_path", "data/vibefairy.db"),
         scout_interval_secs=daemon_raw.get("scout_interval_secs", 3600),
         daily_report_time=daemon_raw.get("daily_report_time", "09:00"),
     )
@@ -165,6 +220,10 @@ def load_config(
         backoff_base_secs=r.get("backoff_base_secs", 30),
         backoff_max_secs=r.get("backoff_max_secs", 300),
         transient_errors=r.get("transient_errors", ["rate_limit", "timeout", "connection_error"]),
+        claude_max_concurrent=r.get("claude_max_concurrent", 2),
+        claude_inner_retries=r.get("claude_inner_retries", 3),
+        claude_inner_backoff_base=r.get("claude_inner_backoff_base", 5.0),
+        claude_inner_backoff_max=r.get("claude_inner_backoff_max", 60.0),
     )
 
     lock_raw = raw.get("lock", {})
@@ -177,7 +236,7 @@ def load_config(
     t = raw.get("triage", {})
     cfg.triage = TriageConfig(
         max_retries=t.get("max_retries", 3),
-        model=t.get("model", "claude-sonnet-4-6"),
+        model=t.get("model"),
         timeout_secs=t.get("timeout_secs", 60),
         queue_scan_interval_secs=t.get("queue_scan_interval_secs", 60),
     )
@@ -189,4 +248,19 @@ def load_config(
         quiet_hours_end=n.get("quiet_hours_end", "08:00"),
     )
 
+    models_raw = raw.get("models", {})
+    cfg.models = ModelConfig()
+    cfg.models.main = _load_model_endpoint(
+        models_raw.get("main", {}),
+        defaults=cfg.models.main,
+    )
+    cfg.models.review = _load_model_endpoint(
+        models_raw.get("review", {}),
+        defaults=cfg.models.review,
+    )
+
+    if cfg.models.main.model is None:
+        cfg.models.main.model = t.get("model", "claude-sonnet-4-6")
+
     return cfg
+

@@ -12,11 +12,16 @@ import logging
 
 import aiosqlite
 
-from claudefairy.config.loader import DaemonConfig
-from claudefairy.config.secrets import Secrets
-from claudefairy.engine.claude_session import ClaudeSession
-from claudefairy.memory import repo
-from claudefairy.memory.models import Discovery
+from vibefairy.config.loader import DaemonConfig
+from vibefairy.config.secrets import Secrets
+from vibefairy.engine.claude_session import (
+    ClaudeSession,
+    ClaudePermanentError,
+    ClaudeTransientError,
+    ClaudeTimeoutError,
+)
+from vibefairy.memory import repo
+from vibefairy.memory.models import Discovery
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +61,11 @@ class Analyst:
             f"Be concrete and reference specific files/modules if possible."
         )
 
-        result = await session.run_readonly(prompt, timeout_secs=90)
+        try:
+            result = await session.run_readonly(prompt, timeout_secs=90)
+        except (ClaudeTransientError, ClaudeTimeoutError, ClaudePermanentError) as e:
+            logger.warning("Analyst failed for discovery %d: %s", discovery.id, e)
+            return "Analysis failed"
         analysis = result.output
 
         await repo.update_discovery_status(self._db, discovery.id, "analyzed")
@@ -68,3 +77,4 @@ class Analyst:
             if t.primary:
                 return t
         return self._cfg.targets[0] if self._cfg.targets else None
+

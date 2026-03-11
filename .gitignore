@@ -1,6 +1,6 @@
 # 密钥和配置
 .env
-claudefairy.toml
+vibefairy.toml
 
 # 数据目录
 data/
@@ -31,3 +31,4 @@ logs/
 .idea/
 *.swp
 *.swo
+

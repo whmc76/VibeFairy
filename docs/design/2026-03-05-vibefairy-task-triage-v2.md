@@ -1,25 +1,25 @@
-# HydraMind — "消息即任务" 交互模型重构 V2 — 设计文档
+# VibeFairy — "消息即任务" 交互模型重构 V2 — 设计文档
 
 状态: Confirmed
 实现完成: 2026-03-05
 日期: 2026-03-05
 涉及文件:
-- src/hydramind/memory/models.py       (新增 Task dataclass)
-- src/hydramind/memory/db.py           (Migration V2: tasks 表)
-- src/hydramind/memory/repo.py         (Task CRUD + claim_for_triage)
-- src/hydramind/agents/triage.py       (新建: 三分类 + 方案生成)
-- src/hydramind/comms/telegram_bot.py  (重写: 按钮卡片 + CallbackQuery)
-- src/hydramind/daemon.py              (接入 TriageAgent + 日报改造)
-- src/hydramind/config/loader.py       (新增 TriageConfig + NotificationConfig)
-- hydramind.toml.example               (新增 [triage] + [notification])
+- src/vibefairy/memory/models.py       (新增 Task dataclass)
+- src/vibefairy/memory/db.py           (Migration V2: tasks 表)
+- src/vibefairy/memory/repo.py         (Task CRUD + claim_for_triage)
+- src/vibefairy/agents/triage.py       (新建: 三分类 + 方案生成)
+- src/vibefairy/comms/telegram_bot.py  (重写: 按钮卡片 + CallbackQuery)
+- src/vibefairy/daemon.py              (接入 TriageAgent + 日报改造)
+- src/vibefairy/config/loader.py       (新增 TriageConfig + NotificationConfig)
+- vibefairy.toml.example               (新增 [triage] + [notification])
 不改动:
-- src/hydramind/engine/policy.py
-- src/hydramind/engine/worker.py
-- src/hydramind/engine/claude_session.py
-- src/hydramind/engine/scheduler.py
-- src/hydramind/config/secrets.py
+- src/vibefairy/engine/policy.py
+- src/vibefairy/engine/worker.py
+- src/vibefairy/engine/claude_session.py
+- src/vibefairy/engine/scheduler.py
+- src/vibefairy/config/secrets.py
 
-Supersedes: docs/design/2026-03-05-hydramind-v2-architecture.md (追加变更)
+Supersedes: docs/design/2026-03-05-vibefairy-v2-architecture.md (追加变更)
 
 ## 问题 / 背景
 

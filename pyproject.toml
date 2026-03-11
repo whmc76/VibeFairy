@@ -3,13 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "claudefairy"
+name = "vibefairy"
 version = "2.0.0"
-description = "ClaudeFairy — Telegram-driven Autonomous AI Assistant Daemon"
+description = "VibeFairy — Telegram-driven Autonomous AI Assistant Daemon"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-keywords = ["ai", "claude", "telegram", "autonomous", "assistant", "agent"]
+keywords = ["ai", "telegram", "autonomous", "assistant", "agent", "codex", "claude"]
 dependencies = [
     "claude-code-sdk>=0.0.14",
     "python-telegram-bot>=20.0",
@@ -20,14 +20,20 @@ dependencies = [
 ]
 
 [project.scripts]
-claudefairy = "claudefairy.__main__:main"
-cf = "claudefairy.__main__:main"
+vibefairy = "vibefairy.__main__:main"
+vf = "vibefairy.__main__:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/claudefairy"]
+packages = ["src/vibefairy"]
 
 [tool.hatch.envs.default]
 python = "3.11"
+
+[project.optional-dependencies]
+test = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 100
@@ -35,3 +41,4 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+

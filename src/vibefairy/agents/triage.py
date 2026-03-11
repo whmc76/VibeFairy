@@ -17,11 +17,16 @@ from dataclasses import dataclass
 
 import aiosqlite
 
-from claudefairy.config.loader import DaemonConfig, TriageConfig
-from claudefairy.config.secrets import Secrets
-from claudefairy.engine.claude_session import ClaudeSession
-from claudefairy.memory import repo
-from claudefairy.memory.models import Task
+from vibefairy.config.loader import DaemonConfig, TriageConfig
+from vibefairy.config.secrets import Secrets
+from vibefairy.engine.claude_session import (
+    ClaudePermanentError,
+    ClaudeTransientError,
+    ClaudeTimeoutError,
+)
+from vibefairy.engine.model_session import build_model_session
+from vibefairy.memory import repo
+from vibefairy.memory.models import Task
 
 logger = logging.getLogger(__name__)
 
@@ -130,9 +135,11 @@ class TriageAgent:
         3. For action: generate plan
         """
         working_dir = self._primary_target_path()
-        session = ClaudeSession(
+        session = build_model_session(
+            self._cfg.models.main,
             working_dir=working_dir,
-            model=self._triage_cfg.model,
+            retry_cfg=self._cfg.retry,
+            model_override=self._triage_cfg.model,
         )
 
         # Step 1: classify
@@ -238,6 +245,37 @@ class TriageAgent:
 
         try:
             result = await self.triage(task)
+        except (ClaudeTransientError, ClaudeTimeoutError) as e:
+            # 瞬态错误：回 received，等调度器重试
+            new_retries = task.triage_retries + 1
+            if new_retries >= self._triage_cfg.max_retries:
+                logger.warning("Triage transient error exhausted retries for task #%d: %s", task_id, e)
+                await repo.update_task(
+                    self._db, task_id,
+                    status="failed",
+                    last_error=f"transient exhausted after {new_retries} retries: {e}",
+                    triage_retries=new_retries,
+                )
+            else:
+                logger.warning("Triage transient error (attempt %d/%d) for task #%d: %s",
+                               new_retries, self._triage_cfg.max_retries, task_id, e)
+                await repo.update_task(
+                    self._db, task_id,
+                    status="received",
+                    last_error=f"transient: {e}",
+                    triage_retries=new_retries,
+                )
+            return
+        except ClaudePermanentError as e:
+            # 永久错误：直接 failed，不重试
+            logger.error("Triage permanent error for task #%d: %s", task_id, e)
+            await repo.update_task(
+                self._db, task_id,
+                status="failed",
+                last_error=f"permanent: {e}",
+                triage_retries=task.triage_retries + 1,
+            )
+            return
         except Exception as e:
             logger.exception("Triage failed for task #%d", task_id)
             new_retries = task.triage_retries + 1
@@ -251,7 +289,7 @@ class TriageAgent:
             else:
                 await repo.update_task(
                     self._db, task_id,
-                    status="received",  # back to received so scheduler can retry
+                    status="received",
                     last_error=str(e),
                     triage_retries=new_retries,
                 )
@@ -312,3 +350,4 @@ class TriageAgent:
             except Exception:
                 logger.exception("Scheduler triage failed for task #%d", task.id)
         return count
+

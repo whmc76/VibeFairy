@@ -1,5 +1,5 @@
 @echo off
-REM HydraMind V2 — start daemon (Windows)
+REM VibeFairy — start daemon (Windows)
 setlocal
 
 set SCRIPT_DIR=%~dp0
@@ -15,5 +15,5 @@ if exist ".venv\Scripts\activate.bat" (
 REM Ensure data dirs
 if not exist "data\logs" mkdir "data\logs"
 
-echo [HydraMind] Starting daemon...
-python -m hydramind run %*
+echo [VibeFairy] Starting daemon...
+python -m vibefairy run %*

@@ -1,9 +1,9 @@
-# HydraMind V2 — Install as Windows Service (requires NSSM)
+# VibeFairy — Install as Windows Service (requires NSSM)
 # Usage: .\scripts\install_service.ps1
 # Requires: nssm.exe in PATH (https://nssm.cc/)
 
 param(
-    [string]$ServiceName = "HydraMind",
+    [string]$ServiceName = "VibeFairy",
     [string]$ProjectDir = (Split-Path -Parent $PSScriptRoot),
     [string]$PythonExe = ""
 )
@@ -30,12 +30,12 @@ if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-Write-Host "Installing HydraMind as Windows service '$ServiceName'..."
+Write-Host "Installing VibeFairy as Windows service '$ServiceName'..."
 
 nssm install $ServiceName $PythonExe
-nssm set $ServiceName AppParameters "-m hydramind run"
+nssm set $ServiceName AppParameters "-m vibefairy run"
 nssm set $ServiceName AppDirectory $ProjectDir
-nssm set $ServiceName DisplayName "HydraMind V2 — AI Assistant Daemon"
+nssm set $ServiceName DisplayName "VibeFairy — AI Assistant Daemon"
 nssm set $ServiceName Description "Secure autonomous AI assistant daemon"
 nssm set $ServiceName Start SERVICE_AUTO_START
 nssm set $ServiceName AppStdout (Join-Path $ProjectDir "data\logs\service_stdout.log")

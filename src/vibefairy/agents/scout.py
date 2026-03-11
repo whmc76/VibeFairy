@@ -21,16 +21,22 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
 
 import httpx
 import aiosqlite
 
-from claudefairy.config.loader import DaemonConfig, ScoutConfig
-from claudefairy.config.secrets import Secrets
-from claudefairy.engine.claude_session import ClaudeSession
-from claudefairy.memory import repo
-from claudefairy.memory.models import Discovery, Improvement
+from vibefairy.config.loader import DaemonConfig, ScoutConfig
+from vibefairy.config.secrets import Secrets
+from vibefairy.engine.claude_session import (
+    ClaudeSession,
+    ClaudePermanentError,
+    ClaudeTransientError,
+    ClaudeTimeoutError,
+)
+from vibefairy.memory import repo
+from vibefairy.memory.models import Discovery, Improvement
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +157,14 @@ class Scout:
             f"Only include repos with score >= {self._scout_cfg.l2_min_score}."
         )
 
-        result = await session.run_readonly(prompt, timeout_secs=60)
+        try:
+            result = await session.run_readonly(prompt, timeout_secs=60)
+        except (ClaudeTransientError, ClaudeTimeoutError) as e:
+            logger.warning("Scout L2 scoring failed (transient): %s", e)
+            return []
+        except ClaudePermanentError as e:
+            logger.error("Scout L2 scoring failed (permanent): %s", e)
+            return []
         return self._parse_scores(result.output, repos)
 
     def _parse_scores(
@@ -196,7 +209,11 @@ class Scout:
             f"Format each as: PRIORITY | EFFORT | SUMMARY | DETAIL"
         )
 
-        result = await session.run_readonly(prompt, timeout_secs=90)
+        try:
+            result = await session.run_readonly(prompt, timeout_secs=90)
+        except (ClaudeTransientError, ClaudeTimeoutError, ClaudePermanentError) as e:
+            logger.warning("Scout L3 analysis failed for discovery %d: %s", discovery.id, e)
+            return
         improvements = self._parse_improvements(result.output, discovery.id, target.name)
 
         for imp in improvements:
@@ -242,42 +259,53 @@ class Scout:
 
         repos: list[RawRepo] = []
         for lang in sc.languages[:3]:  # limit to first 3 languages
-            query = f"language:{lang} stars:>{sc.min_stars_search}"
+            gh_query = f"language:{lang} stars:>{sc.min_stars_search}"
             if sc.keywords:
-                query += " " + " OR ".join(sc.keywords[:3])
+                gh_query += " " + " OR ".join(sc.keywords[:3])
 
             url = f"{GITHUB_API}/search/repositories"
             params = {
-                "q": query,
+                "q": gh_query,
                 "sort": "updated",
                 "order": "desc",
                 "per_page": 20,
             }
-            try:
-                async with httpx.AsyncClient(timeout=30) as client:
-                    resp = await client.get(url, params=params, headers=headers)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    for item in data.get("items", []):
-                        repos.append(
-                            RawRepo(
-                                url=item["html_url"],
-                                title=item["full_name"],
-                                description=item.get("description") or "",
-                                language=item.get("language") or "",
-                                stars=item.get("stargazers_count", 0),
+
+            for gh_attempt in range(3):
+                try:
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        resp = await client.get(url, params=params, headers=headers)
+                        resp.raise_for_status()
+                        data = resp.json()
+                        for item in data.get("items", []):
+                            repos.append(
+                                RawRepo(
+                                    url=item["html_url"],
+                                    title=item["full_name"],
+                                    description=item.get("description") or "",
+                                    language=item.get("language") or "",
+                                    stars=item.get("stargazers_count", 0),
+                                )
                             )
+                    # Rate limit: respect QPS
+                    await asyncio.sleep(1.0 / sc.source_fetch_qps)
+                    break  # success, move to next language
+
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code in (403, 429, 503) and sc.source_fetch_backoff:
+                        backoff = _github_backoff(e.response, gh_attempt)
+                        logger.warning(
+                            "GitHub %d, backoff %ds (attempt %d/3, lang=%s)",
+                            e.response.status_code, backoff, gh_attempt + 1, lang,
                         )
-                # Rate limit: respect QPS
-                await asyncio.sleep(1.0 / sc.source_fetch_qps)
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code in (429, 503) and sc.source_fetch_backoff:
-                    logger.warning("GitHub API rate limit, backing off 60s")
-                    await asyncio.sleep(60)
-                else:
-                    logger.warning("GitHub search failed: %s", e)
-            except Exception as e:
-                logger.warning("GitHub search error: %s", e)
+                        await asyncio.sleep(backoff)
+                    else:
+                        logger.warning("GitHub search failed: %s", e)
+                        break
+
+                except Exception as e:
+                    logger.warning("GitHub search error: %s", e)
+                    break
 
         return repos
 
@@ -332,3 +360,22 @@ class Scout:
         for t in self._cfg.targets:
             parts.append(f"- {t.name}: {t.description}")
         return "\n".join(parts) if parts else "A software project"
+
+
+def _github_backoff(resp: httpx.Response, attempt: int) -> float:
+    """计算 GitHub API 限速后的退避时间（秒）。
+
+    优先使用响应头中的等待指示，fallback 到指数退避。
+    """
+    # 1. Retry-After header（秒数字符串）
+    retry_after = resp.headers.get("retry-after")
+    if retry_after and retry_after.isdigit():
+        return min(int(retry_after), 120)
+    # 2. x-ratelimit-reset（Unix 时间戳）
+    reset_ts = resp.headers.get("x-ratelimit-reset")
+    if reset_ts and reset_ts.isdigit():
+        wait = int(reset_ts) - int(time.time()) + 1
+        return min(max(wait, 1), 120)
+    # 3. fallback：指数退避
+    return min(10 * (2 ** attempt), 120)
+

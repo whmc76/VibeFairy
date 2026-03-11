@@ -1,27 +1,27 @@
-# HydraMind V2 — 安全自主 AI 助手守护进程 设计文档
+# VibeFairy V2 — 安全自主 AI 助手守护进程 设计文档
 
 状态: Confirmed
 日期: 2026-03-05
 涉及文件:
 - pyproject.toml
-- hydramind.toml.example
+- vibefairy.toml.example
 - .env.example
-- src/hydramind/__main__.py
-- src/hydramind/daemon.py
-- src/hydramind/config/loader.py
-- src/hydramind/config/secrets.py
-- src/hydramind/memory/db.py
-- src/hydramind/memory/models.py
-- src/hydramind/memory/repo.py
-- src/hydramind/engine/policy.py
-- src/hydramind/engine/worker.py
-- src/hydramind/engine/claude_session.py
-- src/hydramind/engine/scheduler.py
-- src/hydramind/comms/telegram_bot.py
-- src/hydramind/agents/scout.py
-- src/hydramind/agents/analyst.py
-- src/hydramind/agents/advisor.py
-- src/hydramind/agents/runner.py
+- src/vibefairy/__main__.py
+- src/vibefairy/daemon.py
+- src/vibefairy/config/loader.py
+- src/vibefairy/config/secrets.py
+- src/vibefairy/memory/db.py
+- src/vibefairy/memory/models.py
+- src/vibefairy/memory/repo.py
+- src/vibefairy/engine/policy.py
+- src/vibefairy/engine/worker.py
+- src/vibefairy/engine/claude_session.py
+- src/vibefairy/engine/scheduler.py
+- src/vibefairy/comms/telegram_bot.py
+- src/vibefairy/agents/scout.py
+- src/vibefairy/agents/analyst.py
+- src/vibefairy/agents/advisor.py
+- src/vibefairy/agents/runner.py
 - scripts/start.sh, start.bat, install_service.ps1
 
 ## 问题 / 背景
@@ -33,7 +33,7 @@ V1 方案审查发现 4 个 P0 + 3 个 P1 + 1 个 P2 问题：
 
 ## 方案
 
-独立项目 `E:\WorkSpace\HydraMind\`，控制平面 + 执行平面分离架构。
+独立项目 `E:\WorkSpace\VibeFairy\`，控制平面 + 执行平面分离架构。
 
 ### 核心安全机制
 1. **零硬编码**: 所有密钥只从 `os.environ` 读取，缺失则 daemon 拒绝启动
@@ -60,7 +60,7 @@ discovered → analyzed → proposed → approved → executing → applied/fail
 
 ## 关键决策
 
-1. **独立项目而非子模块** — 保证 HydraMind 生命周期独立于 HydraMatrix
+1. **独立项目而非子模块** — 保证 VibeFairy 生命周期独立于 HydraMatrix
 2. **aiosqlite 直接 SQL，不用 ORM** — 6 表 schema 简单，ORM 引入额外复杂性
 3. **python-telegram-bot v20+（native async）** — 避免线程切换
 4. **Claude Code SDK（claude-code-sdk）** — 复用 Claude Code 的工具系统
@@ -79,7 +79,7 @@ discovered → analyzed → proposed → approved → executing → applied/fail
 
 ### 目录结构
 ```
-src/hydramind/
+src/vibefairy/
   config/    — loader.py (TOML) + secrets.py (env only)
   memory/    — db.py (SQLite 6表) + models.py + repo.py (CRUD)
   engine/    — policy.py + worker.py + claude_session.py + scheduler.py

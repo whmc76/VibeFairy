@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# HydraMind V2 — start daemon
+# VibeFairy — start daemon
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,5 +15,5 @@ fi
 # Ensure data dirs exist
 mkdir -p data/logs
 
-echo "[HydraMind] Starting daemon..."
-python -m hydramind run "$@"
+echo "[VibeFairy] Starting daemon..."
+python -m vibefairy run "$@"

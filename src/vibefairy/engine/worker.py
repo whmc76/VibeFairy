@@ -20,12 +20,18 @@ from dataclasses import dataclass
 
 import aiosqlite
 
-from claudefairy.config.loader import DaemonConfig
-from claudefairy.config.secrets import Secrets
-from claudefairy.engine.claude_session import ClaudeSession
-from claudefairy.engine.policy import ExecutionMode, PolicyEngine
-from claudefairy.memory import repo
-from claudefairy.memory.models import Improvement, Run
+from vibefairy.config.loader import DaemonConfig
+from vibefairy.config.secrets import Secrets
+from vibefairy.engine.claude_session import (
+    ClaudePermanentError,
+    ClaudeTransientError,
+    ClaudeTimeoutError,
+)
+from vibefairy.engine.model_session import build_model_session
+from vibefairy.engine.policy import ExecutionMode, PolicyEngine
+from vibefairy.engine.resilience import get_claude_semaphore, is_transient_error
+from vibefairy.memory import repo
+from vibefairy.memory.models import Improvement, Run
 
 logger = logging.getLogger(__name__)
 
@@ -178,73 +184,113 @@ class Worker:
         imp = task.improvement
         lock_holder = f"run_{run_id}"
 
-        # Acquire target lock for write operations
-        if task.requested_mode == ExecutionMode.WRITE:
-            acquired = await repo.acquire_lock(
-                self._db, imp.target, lock_holder, self._cfg.lock_ttl_minutes
+        # 锁序：sem → lock → run（避免持锁等信号量导致死锁）
+        sem = get_claude_semaphore()
+        async with sem:
+            # Acquire write lock after holding semaphore slot
+            if task.requested_mode == ExecutionMode.WRITE:
+                acquired = await repo.acquire_lock(
+                    self._db, imp.target, lock_holder, self._cfg.lock_ttl_minutes
+                )
+                if not acquired:
+                    return WorkerResult(
+                        run_id=run_id,
+                        success=False,
+                        output="",
+                        token_count=0,
+                        duration_secs=0,
+                        exit_code=1,
+                        mode=task.requested_mode,
+                        error="target_locked",
+                    )
+
+            await repo.update_run(self._db, run_id, status="executing")
+
+            # Worker already holds the semaphore slot — pass semaphore=None to skip inner control
+            session = build_model_session(
+                self._cfg.models.main,
+                working_dir=target_path,
+                retry_cfg=self._cfg.retry,
+                semaphore=None,
             )
-            if not acquired:
+
+            start = time.monotonic()
+            try:
+                if task.requested_mode == ExecutionMode.WRITE:
+                    result = await session.run_write(task.prompt)
+                else:
+                    result = await session.run_readonly(task.prompt)
+
+                # Success path
+                await repo.update_run(
+                    self._db,
+                    run_id,
+                    status="applied",
+                    output_summary=result.output[:2000],
+                    token_count=result.token_count,
+                    duration_secs=result.duration_secs,
+                    exit_code=result.exit_code,
+                )
+                if imp.id is not None:
+                    await repo.update_improvement_status(self._db, imp.id, "applied")
+
+                return WorkerResult(
+                    run_id=run_id,
+                    success=True,
+                    output=result.output,
+                    token_count=result.token_count,
+                    duration_secs=result.duration_secs,
+                    exit_code=result.exit_code,
+                    mode=task.requested_mode,
+                )
+
+            except (ClaudeTransientError, ClaudeTimeoutError) as e:
+                # Transient: outer retry loop will decide whether to re-attempt
+                logger.warning("Transient/timeout error in run %d: %s", run_id, e)
+                await repo.update_run(self._db, run_id, status="failed", output_summary=str(e)[:500])
                 return WorkerResult(
                     run_id=run_id,
                     success=False,
                     output="",
                     token_count=0,
-                    duration_secs=0,
+                    duration_secs=time.monotonic() - start,
                     exit_code=1,
                     mode=task.requested_mode,
-                    error="target_locked",
+                    error=str(e),
                 )
 
-        await repo.update_run(self._db, run_id, status="executing")
+            except ClaudePermanentError as e:
+                # Permanent: no retry
+                logger.error("Permanent error in run %d: %s", run_id, e)
+                await repo.update_run(self._db, run_id, status="failed", output_summary=str(e)[:500])
+                return WorkerResult(
+                    run_id=run_id,
+                    success=False,
+                    output="",
+                    token_count=0,
+                    duration_secs=time.monotonic() - start,
+                    exit_code=1,
+                    mode=task.requested_mode,
+                    error=f"permanent: {e}",
+                )
 
-        session = ClaudeSession(working_dir=target_path)
+            except Exception as e:
+                logger.exception("Unexpected error in run %d", run_id)
+                await repo.update_run(self._db, run_id, status="failed", output_summary=str(e)[:500])
+                return WorkerResult(
+                    run_id=run_id,
+                    success=False,
+                    output="",
+                    token_count=0,
+                    duration_secs=time.monotonic() - start,
+                    exit_code=1,
+                    mode=task.requested_mode,
+                    error=str(e),
+                )
 
-        start = time.monotonic()
-        try:
-            if task.requested_mode == ExecutionMode.WRITE:
-                result = await session.run_write(task.prompt)
-            else:
-                result = await session.run_readonly(task.prompt)
-
-            status = "applied" if result.exit_code == 0 else "failed"
-            await repo.update_run(
-                self._db,
-                run_id,
-                status=status,
-                output_summary=result.output[:2000],
-                token_count=result.token_count,
-                duration_secs=result.duration_secs,
-                exit_code=result.exit_code,
-            )
-            if imp.id is not None:
-                await repo.update_improvement_status(self._db, imp.id, status)
-
-            return WorkerResult(
-                run_id=run_id,
-                success=result.exit_code == 0,
-                output=result.output,
-                token_count=result.token_count,
-                duration_secs=result.duration_secs,
-                exit_code=result.exit_code,
-                mode=task.requested_mode,
-            )
-
-        except Exception as e:
-            logger.exception("Unexpected error in run %d", run_id)
-            await repo.update_run(self._db, run_id, status="failed", output_summary=str(e)[:500])
-            return WorkerResult(
-                run_id=run_id,
-                success=False,
-                output="",
-                token_count=0,
-                duration_secs=time.monotonic() - start,
-                exit_code=1,
-                mode=task.requested_mode,
-                error=str(e),
-            )
-        finally:
-            if task.requested_mode == ExecutionMode.WRITE:
-                await repo.release_lock(self._db, imp.target, lock_holder)
+            finally:
+                if task.requested_mode == ExecutionMode.WRITE:
+                    await repo.release_lock(self._db, imp.target, lock_holder)
 
     def _find_target(self, name: str) -> dict | None:
         for t in self._cfg.targets:
@@ -253,6 +299,5 @@ class Worker:
         return None
 
     def _is_transient(self, error: str) -> bool:
-        transient = self._cfg.retry.transient_errors
-        error_lower = error.lower()
-        return any(t in error_lower for t in transient)
+        return is_transient_error(error, extra_patterns=self._cfg.retry.transient_errors)
+

@@ -1,0 +1,85 @@
+# VibeFairy — 配置模板
+# 复制为 vibefairy.toml 后填入真实配置
+# 所有密钥必须通过 .env 文件或环境变量传入，不得写在此文件中
+
+[daemon]
+log_level = "info"
+log_dir = "data/logs"
+db_path = "data/vibefairy.db"
+scout_interval_secs = 3600
+daily_report_time = "09:00"
+
+[targets]
+[[targets.projects]]
+name = "HydraMatrix"
+path = "E:/WorkSpace/HydraMatrix"
+description = "Agent workspace"
+allow_write = true
+primary = true
+
+[budget]
+daily_token_limit = 500_000
+per_task_token_limit = 50_000
+source_fetch_qps = 2
+source_fetch_backoff = true
+over_budget_mode = "report_only"
+
+[scout]
+min_stars_search = 100
+min_stars_trending = 50
+l2_min_score = 6.0
+l3_notify_score = 8.0
+languages = ["rust", "python", "typescript", "go"]
+keywords = [
+    "agent", "llm", "ai", "async", "tokio",
+    "orchestrator", "workflow", "scheduler",
+]
+
+[retry]
+max_retries = 3
+backoff_base_secs = 30
+backoff_max_secs = 300
+transient_errors = ["rate_limit", "timeout", "connection_error"]
+claude_max_concurrent = 2
+claude_inner_retries = 3
+claude_inner_backoff_base = 5.0
+claude_inner_backoff_max = 60.0
+
+[lock]
+ttl_minutes = 60
+
+[approval]
+default_ttl_minutes = 30
+
+[triage]
+max_retries = 3
+# 可选：只在 triage 场景覆盖主模型。留空则继承 [models.main].model
+# model = "claude-sonnet-4-6"
+timeout_secs = 60
+queue_scan_interval_secs = 60
+
+[models.main]
+# 主模型 provider：claude_code / codex / gemini / kimi / minimax
+provider = "claude_code"
+model = "claude-sonnet-4-6"
+timeout_secs = 300
+# command 仅用于 CLI provider；claude_code 默认走 SDK 可不填
+# command = "codex"
+# 对 gemini / kimi / minimax 这类 CLI，请显式提供 readonly_command / write_command
+# 占位符支持：{command} {model} {working_dir} {provider}
+# readonly_command = ["your-wrapper", "{working_dir}", "{model}", "readonly"]
+# write_command = ["your-wrapper", "{working_dir}", "{model}", "write"]
+
+[models.review]
+enabled = true
+provider = "codex"
+# 不填 model = 使用 provider 默认模型
+# model = "o4-mini"
+timeout_secs = 120
+command = "codex"
+# 非内建 provider 适配时同样支持自定义命令模板
+# readonly_command = ["your-review-wrapper", "{working_dir}", "{model}", "review"]
+
+[notification]
+quiet_hours_start = "23:00"
+quiet_hours_end = "08:00"
