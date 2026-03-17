@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from vibefairy.engine.session_manager import SessionManager
     from vibefairy.engine.worker import Worker
     from vibefairy.agents.triage import TriageAgent
+    from vibefairy.engine.auth_manager import AuthManager
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,7 @@ class TelegramBot:
         self._triage_fn: TriageFn | None = None
         self._switch_fn: SwitchFn | None = None
         self._reload_fn: ReloadFn | None = None
+        self._auth_manager: "AuthManager | None" = None
         self._app: Application | None = None
         self._start_time = datetime.now(tz=timezone.utc)
 
@@ -108,6 +110,9 @@ class TelegramBot:
 
     def set_reload_fn(self, fn: ReloadFn) -> None:
         self._reload_fn = fn
+
+    def set_auth_manager(self, auth_manager: "AuthManager") -> None:
+        self._auth_manager = auth_manager
 
     async def start(self) -> None:
         self._app = Application.builder().token(self._secrets.telegram_bot_token).build()
@@ -141,6 +146,8 @@ class TelegramBot:
             CommandHandler("dismiss",     self._cmd_dismiss),
             CommandHandler("cancel",      self._cmd_cancel),
             CommandHandler("switch",      self._cmd_switch),
+            CommandHandler("auth",        self._cmd_auth),
+            CommandHandler("login",       self._cmd_login),
             CallbackQueryHandler(self._handle_callback),
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message),
         ]
@@ -386,6 +393,15 @@ class TelegramBot:
                 await query.edit_message_text(f"未知后端: {id_str}")
                 return
             await self._do_switch(query, target)
+            return
+        if action == "login":
+            try:
+                target = CLIBackend(id_str.lower())
+            except ValueError:
+                await query.edit_message_text(f"未知后端: {id_str}")
+                return
+            await query.edit_message_text(f"正在启动 {target.display_name} 登录流程...")
+            asyncio.create_task(self._run_login_and_notify(query.message, target))
             return
         try:
             task_id = int(id_str)
@@ -742,6 +758,30 @@ class TelegramBot:
                 session_lines.append(f"活跃会话: <b>{active.name}</b> ({active.backend})")
                 session_lines.append(f"工作目录: <code>{active.working_dir}</code>")
             session_lines.append(f"会话总数: {len(all_s)}")
+
+        # Query auth status for both backends (if auth_manager available)
+        auth_buttons: list[InlineKeyboardButton] = []
+        if self._auth_manager is not None:
+            for backend in (CLIBackend.CLAUDE, CLIBackend.CODEX):
+                try:
+                    st = await self._auth_manager.check_auth(backend)
+                    icon = "已登录" if st.logged_in else "未绑定"
+                    if not st.logged_in:
+                        auth_buttons.append(
+                            InlineKeyboardButton(
+                                f"一键绑定 {backend.display_name}",
+                                callback_data=f"login:{backend.value}",
+                            )
+                        )
+                except Exception:
+                    icon = "?"
+                    auth_buttons.append(
+                        InlineKeyboardButton(
+                            f"一键绑定 {backend.display_name}",
+                            callback_data=f"login:{backend.value}",
+                        )
+                    )
+
         lines = [
             "<b>VibeFairy 状态</b>",
             f"运行时间: {uptime_str}",
@@ -759,7 +799,17 @@ class TelegramBot:
             f"  待确认: {counts.get('awaiting_user_decision', 0)}",
             f"  执行中: {counts.get('executing', 0)}",
         ])
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+        keyboard = None
+        if auth_buttons:
+            lines.append("\n未绑定的后端，点击一键完成认证:")
+            keyboard = InlineKeyboardMarkup([auth_buttons])
+
+        await update.message.reply_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
 
     async def _cmd_reload(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._auth_check(update):
@@ -1123,13 +1173,38 @@ class TelegramBot:
         current = self._worker.backend
         if not args:
             other = CLIBackend.CODEX if current == CLIBackend.CLAUDE else CLIBackend.CLAUDE
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton(f"切换到 {other.display_name}", callback_data=f"switch:{other.value}")
-            ]])
+
+            # Build per-backend status rows with switch + login buttons
+            kbd_rows: list[list[InlineKeyboardButton]] = []
+            for backend in (CLIBackend.CLAUDE, CLIBackend.CODEX):
+                row: list[InlineKeyboardButton] = []
+                if backend != current:
+                    row.append(InlineKeyboardButton(
+                        f"切换到 {backend.display_name}",
+                        callback_data=f"switch:{backend.value}",
+                    ))
+                if self._auth_manager is not None:
+                    try:
+                        st = await self._auth_manager.check_auth(backend)
+                        auth_label = "已绑定" if st.logged_in else "一键绑定"
+                    except Exception:
+                        auth_label = "一键绑定"
+                    if auth_label == "一键绑定":
+                        row.append(InlineKeyboardButton(
+                            f"一键绑定 {backend.display_name}",
+                            callback_data=f"login:{backend.value}",
+                        ))
+                if row:
+                    kbd_rows.append(row)
+
+            keyboard = InlineKeyboardMarkup(kbd_rows) if kbd_rows else None
             await update.message.reply_text(
                 f"当前全局后端: <b>{current.display_name}</b>\n\n"
-                f"注: /switch 切换全局后端（影响传统任务流程）\n会话级后端请使用 /backend 命令",
-                parse_mode="HTML", reply_markup=keyboard,
+                f"注: /switch 切换全局后端（影响传统任务流程）\n"
+                f"会话级后端请使用 /backend 命令\n\n"
+                f"未绑定的后端可点击下方按钮一键完成认证:",
+                parse_mode="HTML",
+                reply_markup=keyboard,
             )
             return
         target_str = args[0].lower()
