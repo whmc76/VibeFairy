@@ -26,6 +26,9 @@ class Secrets:
     # Optional: only needed if bypassing the local `claude` CLI auth
     anthropic_api_key: str | None
     github_token: str | None
+    # Optional: required when using Codex backend
+    openai_api_key: str | None
+    codex_model: str = "codex-mini-latest"
 
 
 def load_secrets() -> Secrets:
@@ -67,9 +70,17 @@ def load_secrets() -> Secrets:
 
     github_token = os.environ.get("GITHUB_TOKEN", "").strip() or None
 
+    openai_key = os.environ.get("OPENAI_API_KEY", "").strip() or None
+    if openai_key and openai_key.startswith("sk-your"):
+        openai_key = None  # ignore placeholder values
+
+    codex_model = os.environ.get("CODEX_MODEL", "codex-mini-latest").strip() or "codex-mini-latest"
+
     return Secrets(
         telegram_bot_token=token,
         allowed_chat_ids=allowed_ids,
         anthropic_api_key=anthropic_key,
         github_token=github_token,
+        openai_api_key=openai_key,
+        codex_model=codex_model,
     )

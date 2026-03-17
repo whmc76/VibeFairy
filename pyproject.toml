@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "claudefairy"
+name = "vibefairy"
 version = "2.0.0"
-description = "ClaudeFairy — Telegram-driven Autonomous AI Assistant Daemon"
+description = "VibeFairy — Telegram-driven Autonomous AI Assistant Daemon"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
@@ -20,11 +20,11 @@ dependencies = [
 ]
 
 [project.scripts]
-claudefairy = "claudefairy.__main__:main"
-cf = "claudefairy.__main__:main"
+vibefairy = "vibefairy.__main__:main"
+vf = "vibefairy.__main__:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/claudefairy"]
+packages = ["src/vibefairy"]
 
 [tool.hatch.envs.default]
 python = "3.11"

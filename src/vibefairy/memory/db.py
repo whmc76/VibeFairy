@@ -13,7 +13,7 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
-CURRENT_VERSION = 2
+CURRENT_VERSION = 3
 
 # Full schema DDL (all 6 tables)
 _SCHEMA_V1 = """
@@ -130,6 +130,37 @@ CREATE INDEX IF NOT EXISTS idx_tasks_decision ON tasks(decision_needed) WHERE de
 """
 
 
+# Migration V3: sessions + session_messages tables
+_SCHEMA_V3 = """
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    chat_id TEXT NOT NULL,
+    working_dir TEXT NOT NULL,
+    backend TEXT NOT NULL DEFAULT 'claude',
+    model TEXT,
+    session_id TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS session_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER REFERENCES sessions(id),
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    token_count INTEGER DEFAULT 0,
+    telegram_message_id INTEGER,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_chat_id ON sessions(chat_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+CREATE INDEX IF NOT EXISTS idx_session_messages_session_id ON session_messages(session_id);
+"""
+
+
 async def open_db(db_path: str | Path) -> aiosqlite.Connection:
     """Open (or create) the SQLite database and run migrations."""
     path = Path(db_path)
@@ -168,3 +199,9 @@ async def _migrate(db: aiosqlite.Connection, from_version: int) -> None:
         await db.execute("PRAGMA user_version = 2")
         await db.commit()
         logger.info("Migration to version 2 complete")
+        from_version = 2
+    if from_version < 3:
+        await db.executescript(_SCHEMA_V3)
+        await db.execute("PRAGMA user_version = 3")
+        await db.commit()
+        logger.info("Migration to version 3 complete")

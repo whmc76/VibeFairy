@@ -1,13 +1,13 @@
-# ClaudeFairy
+# VibeFairy
 
 > A Telegram-driven autonomous AI assistant daemon — every message becomes a tracked task.
 
-ClaudeFairy connects your Telegram to Claude Code. Send a message, and it automatically classifies, plans, and executes — with your approval.
+VibeFairy connects your Telegram to Claude Code. Send a message, and it automatically classifies, plans, and executes — with your approval.
 
 ## How It Works
 
 ```
-You (Telegram) → ClaudeFairy → Claude Code (claude-code-sdk)
+You (Telegram) → VibeFairy → Claude Code (claude-code-sdk)
                      ↓
          Auto-triage: note / question / action
                      ↓ (action only)
@@ -39,8 +39,8 @@ You (Telegram) → ClaudeFairy → Claude Code (claude-code-sdk)
 ### 2. Install
 
 ```bash
-git clone https://github.com/whmc76/ClaudeFairy.git
-cd ClaudeFairy
+git clone https://github.com/whmc76/VibeFairy.git
+cd VibeFairy
 pip install -e .
 ```
 
@@ -50,8 +50,8 @@ pip install -e .
 cp .env.example .env
 # Edit .env — fill in your Telegram bot token and allowed chat IDs
 
-cp claudefairy.toml.example claudefairy.toml
-# Edit claudefairy.toml — set your project path in [[targets.projects]]
+cp vibefairy.toml.example vibefairy.toml
+# Edit vibefairy.toml — set your project path in [[targets.projects]]
 ```
 
 `.env` contents:
@@ -64,18 +64,18 @@ ANTHROPIC_API_KEY=your_anthropic_key_here
 ### 4. Run
 
 **GUI (recommended):**
-Double-click `启动ClaudeFairy.bat` (Windows) — opens a launcher window where you can pick the project directory and start/stop the daemon.
+Double-click `启动VibeFairy.bat` (Windows) — opens a launcher window where you can pick the project directory and start/stop the daemon.
 
 **CLI:**
 ```bash
-claudefairy run
+vibefairy run
 # or
-cf run
+vf run
 ```
 
 **Check config:**
 ```bash
-cf check
+vf check
 ```
 
 ## Task State Machine
@@ -102,9 +102,9 @@ Or just use the inline buttons on the plan card — no need to remember IDs.
 
 ## Configuration
 
-See [`claudefairy.toml.example`](claudefairy.toml.example) for all options including:
+See [`vibefairy.toml.example`](vibefairy.toml.example) for all options including:
 - `[daemon]` — log level, DB path, scout interval, daily report time
-- `[targets]` — projects ClaudeFairy can work on
+- `[targets]` — projects VibeFairy can work on
 - `[budget]` — daily/per-task token limits
 - `[triage]` — classification model, retries, timeout
 - `[notification]` — quiet hours
@@ -112,7 +112,7 @@ See [`claudefairy.toml.example`](claudefairy.toml.example) for all options inclu
 ## Architecture
 
 ```
-src/claudefairy/
+src/vibefairy/
 ├── __main__.py          Entry point (CLI)
 ├── daemon.py            Main daemon loop + scheduler
 ├── agents/
@@ -142,7 +142,7 @@ src/claudefairy/
 - All task executions require explicit user approval via Telegram button
 - Only whitelisted chat IDs can interact with the bot
 - Claude Code runs with the permissions of your local user — review plans before approving
-- Secrets in `.env` only, never in `claudefairy.toml`
+- Secrets in `.env` only, never in `vibefairy.toml`
 
 ## License
 

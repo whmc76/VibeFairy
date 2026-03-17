@@ -10,11 +10,11 @@ import logging
 
 import aiosqlite
 
-from claudefairy.config.loader import DaemonConfig
-from claudefairy.config.secrets import Secrets
-from claudefairy.engine.claude_session import ClaudeSession
-from claudefairy.memory import repo
-from claudefairy.memory.models import Discovery, Improvement
+from vibefairy.config.loader import DaemonConfig
+from vibefairy.config.secrets import Secrets
+from vibefairy.engine.claude_session import ClaudeSession
+from vibefairy.memory import repo
+from vibefairy.memory.models import Discovery, Improvement
 
 logger = logging.getLogger(__name__)
 

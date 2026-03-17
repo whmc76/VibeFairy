@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
-from .models import Approval, Discovery, Event, Improvement, Lock, Run, Task
+from .models import Approval, Discovery, Event, Improvement, Lock, Run, Session, SessionMessage, Task
 
 logger = logging.getLogger(__name__)
 
@@ -559,6 +559,152 @@ async def list_received_tasks(db: aiosqlite.Connection) -> list[Task]:
     ) as cur:
         rows = await cur.fetchall()
         return [_row_to_task(r) for r in rows]
+
+
+# --------------------------------------------------------------------------- #
+# Sessions
+# --------------------------------------------------------------------------- #
+
+async def create_session(db: aiosqlite.Connection, session: Session) -> int:
+    async with db.execute(
+        """
+        INSERT INTO sessions (name, chat_id, working_dir, backend, model, session_id, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (session.name, session.chat_id, session.working_dir,
+         session.backend, session.model, session.session_id, session.status),
+    ) as cur:
+        row_id = cur.lastrowid
+    await db.commit()
+    return row_id
+
+
+async def get_session(db: aiosqlite.Connection, session_id: int) -> Session | None:
+    async with db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)) as cur:
+        row = await cur.fetchone()
+        return _row_to_session(row) if row else None
+
+
+async def get_session_by_name(db: aiosqlite.Connection, name: str) -> Session | None:
+    async with db.execute("SELECT * FROM sessions WHERE name = ?", (name,)) as cur:
+        row = await cur.fetchone()
+        return _row_to_session(row) if row else None
+
+
+async def list_sessions(
+    db: aiosqlite.Connection,
+    chat_id: str | None = None,
+    status: str | None = None,
+) -> list[Session]:
+    conditions: list[str] = []
+    params: list = []
+    if chat_id:
+        conditions.append("chat_id = ?")
+        params.append(chat_id)
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    async with db.execute(
+        f"SELECT * FROM sessions {where} ORDER BY updated_at DESC, created_at DESC", params
+    ) as cur:
+        rows = await cur.fetchall()
+        return [_row_to_session(r) for r in rows]
+
+
+async def list_all_active_sessions(db: aiosqlite.Connection) -> list[Session]:
+    """Return all sessions with status='active', sorted by most recently updated."""
+    async with db.execute(
+        "SELECT * FROM sessions WHERE status = 'active' ORDER BY updated_at DESC, created_at DESC"
+    ) as cur:
+        rows = await cur.fetchall()
+        return [_row_to_session(r) for r in rows]
+
+
+async def update_session(db: aiosqlite.Connection, session_id: int, **kwargs) -> None:
+    if not kwargs:
+        return
+    kwargs["updated_at"] = _now().isoformat()
+    set_clause = ", ".join(f"{k} = ?" for k in kwargs)
+    values = list(kwargs.values()) + [session_id]
+    await db.execute(f"UPDATE sessions SET {set_clause} WHERE id = ?", values)
+    await db.commit()
+
+
+async def close_session(db: aiosqlite.Connection, session_id: int) -> None:
+    await db.execute(
+        "UPDATE sessions SET status = 'closed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (session_id,),
+    )
+    await db.commit()
+
+
+async def pause_all_active_sessions(db: aiosqlite.Connection) -> int:
+    """Mark all active sessions as paused (used on crash recovery)."""
+    async with db.execute(
+        "UPDATE sessions SET status = 'paused', updated_at = CURRENT_TIMESTAMP WHERE status = 'active'"
+    ) as cur:
+        count = cur.rowcount
+    await db.commit()
+    return count
+
+
+def _row_to_session(row: aiosqlite.Row) -> Session:
+    return Session(
+        id=row["id"],
+        name=row["name"],
+        chat_id=row["chat_id"],
+        working_dir=row["working_dir"],
+        backend=row["backend"],
+        model=row["model"],
+        session_id=row["session_id"],
+        status=row["status"],
+        created_at=_parse_dt(row["created_at"]),
+        updated_at=_parse_dt(row["updated_at"]),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Session Messages
+# --------------------------------------------------------------------------- #
+
+async def create_session_message(db: aiosqlite.Connection, msg: SessionMessage) -> int:
+    async with db.execute(
+        """
+        INSERT INTO session_messages (session_id, role, content, token_count, telegram_message_id)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (msg.session_id, msg.role, msg.content, msg.token_count, msg.telegram_message_id),
+    ) as cur:
+        row_id = cur.lastrowid
+    await db.commit()
+    return row_id
+
+
+async def list_session_messages(
+    db: aiosqlite.Connection,
+    session_id: int,
+    limit: int = 50,
+) -> list[SessionMessage]:
+    async with db.execute(
+        "SELECT * FROM session_messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?",
+        (session_id, limit),
+    ) as cur:
+        rows = await cur.fetchall()
+        # Return in chronological order
+        return [_row_to_session_message(r) for r in reversed(rows)]
+
+
+def _row_to_session_message(row: aiosqlite.Row) -> SessionMessage:
+    return SessionMessage(
+        id=row["id"],
+        session_id=row["session_id"],
+        role=row["role"],
+        content=row["content"],
+        token_count=row["token_count"] or 0,
+        telegram_message_id=row["telegram_message_id"],
+        created_at=_parse_dt(row["created_at"]),
+    )
 
 
 def _row_to_task(row: aiosqlite.Row) -> Task:

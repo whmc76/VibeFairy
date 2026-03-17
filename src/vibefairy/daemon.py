@@ -4,9 +4,9 @@ Startup sequence:
 1. Load config + secrets (fail fast on missing secrets)
 2. Setup logging
 3. Open SQLite DB + run migrations
-4. Crash recovery: mark stuck 'executing' runs as failed
-5. Build subsystems: policy, worker, bot, scheduler
-6. Register jobs: scout interval, daily report
+4. Crash recovery: mark stuck 'executing' runs as failed; pause active sessions
+5. Build subsystems: policy, worker, session_manager, bot, scheduler
+6. Register jobs: scout interval (if enabled), daily report
 7. Start Telegram bot
 8. Run scheduler
 9. On shutdown: stop bot, scheduler, close DB
@@ -25,13 +25,14 @@ from pathlib import Path
 
 import aiosqlite
 
-from claudefairy.config.loader import DaemonConfig, load_config
-from claudefairy.config.secrets import SecretsError, load_secrets
-from claudefairy.engine.policy import ExecutionMode, PolicyEngine
-from claudefairy.engine.scheduler import Scheduler
-from claudefairy.engine.worker import Worker
-from claudefairy.memory import repo
-from claudefairy.memory.db import open_db
+from vibefairy.config.loader import DaemonConfig, load_config
+from vibefairy.config.secrets import SecretsError, load_secrets
+from vibefairy.engine.cli_backend import CLIBackend, load_backend, save_backend
+from vibefairy.engine.policy import ExecutionMode, PolicyEngine
+from vibefairy.engine.scheduler import Scheduler
+from vibefairy.engine.worker import Worker
+from vibefairy.memory import repo
+from vibefairy.memory.db import open_db
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ def _setup_logging(cfg: DaemonConfig) -> None:
 
     # File handler (rotating)
     file_handler = logging.handlers.RotatingFileHandler(
-        log_dir / "claudefairy.jsonl",
+        log_dir / "vibefairy.jsonl",
         maxBytes=10 * 1024 * 1024,  # 10 MB
         backupCount=5,
         encoding="utf-8",
@@ -118,12 +119,17 @@ async def _crash_recovery(db: aiosqlite.Connection, bot=None) -> None:
                 detail=f"task={task.id} reset triaging→received",
             )
 
-    # 3. Clean expired locks
+    # 3. Pause active sessions so users know the daemon restarted
+    paused = await repo.pause_all_active_sessions(db)
+    if paused:
+        logger.info("Crash recovery: paused %d active session(s)", paused)
+
+    # 4. Clean expired locks
     count = await repo.cleanup_expired_locks(db)
     if count:
         logger.info("Crash recovery: cleaned %d expired locks", count)
 
-    if bot and (stuck_runs or stuck_tasks):
+    if bot and (stuck_runs or stuck_tasks or paused):
         try:
             parts = []
             if stuck_runs:
@@ -131,6 +137,8 @@ async def _crash_recovery(db: aiosqlite.Connection, bot=None) -> None:
                 parts.append(f"{len(stuck_runs)} stuck run(s): {run_summary}")
             if stuck_tasks:
                 parts.append(f"{len(stuck_tasks)} stuck triage task(s) reset to received")
+            if paused:
+                parts.append(f"{paused} session(s) paused — use /sessions to check")
             await bot.broadcast(
                 f"Daemon restarted. Crash recovery: {'; '.join(parts)}"
             )
@@ -174,7 +182,7 @@ async def _generate_daily_report(
     dead_letter = await repo.list_improvements(db, status="dead_letter", limit=5)
 
     lines = [
-        f"<b>ClaudeFairy 日报 — {today.strftime('%Y-%m-%d')}</b>",
+        f"<b>VibeFairy 日报 — {today.strftime('%Y-%m-%d')}</b>",
         "",
         f"<b>任务看板:</b> 待分拣 {received_queue} | 待确认 {awaiting_decision} | 执行中 {executing} | 今日完成 {len(done_today)}",
         f"<b>预算:</b> {today_tokens:,}/{daily_limit:,} tokens ({pct:.1f}%)",
@@ -221,7 +229,7 @@ async def run_daemon(
 
     # 2. Setup logging
     _setup_logging(cfg)
-    logger.info("ClaudeFairy V2 starting up...")
+    logger.info("VibeFairy starting up...")
 
     # 3. Load secrets (fail fast)
     try:
@@ -238,52 +246,105 @@ async def run_daemon(
 
     # 5. Build subsystems
     policy = PolicyEngine(cfg=cfg, db=db)
-    worker = Worker(cfg=cfg, secrets=secrets, db=db, policy=policy)
+    initial_backend = load_backend()
+    worker = Worker(cfg=cfg, secrets=secrets, db=db, policy=policy, backend=initial_backend)
+    logger.info("CLI backend: %s", initial_backend.display_name)
 
     # Import bot here (avoids circular imports at module level)
-    from claudefairy.comms.telegram_bot import TelegramBot
-    bot = TelegramBot(cfg=cfg, secrets=secrets, db=db, policy=policy, worker=worker)
+    from vibefairy.comms.telegram_bot import TelegramBot
+    from vibefairy.engine.session_manager import SessionManager
+
+    # 5b. Build session manager
+    session_mgr = SessionManager(db=db, secrets=secrets)
+    await session_mgr.initialize()
+    logger.info("SessionManager initialized")
+
+    bot = TelegramBot(
+        cfg=cfg, secrets=secrets, db=db,
+        policy=policy, worker=worker,
+        session_manager=session_mgr,
+    )
 
     # 6. Crash recovery (before bot.start so we can send notification)
     await _crash_recovery(db, bot=None)  # bot not started yet, skip notification
 
-    # 7. Build agents
-    from claudefairy.agents.scout import Scout
-    from claudefairy.agents.analyst import Analyst
-    from claudefairy.agents.advisor import Advisor
-    from claudefairy.agents.runner import Runner
-    from claudefairy.agents.triage import TriageAgent
+    # 7. Build agents (conditionally based on feature flags)
+    scout = None
+    triage_agent = None
 
-    scout = Scout(cfg=cfg, secrets=secrets, db=db)
-    analyst = Analyst(cfg=cfg, secrets=secrets, db=db)
-    advisor = Advisor(cfg=cfg, secrets=secrets, db=db)
-    runner = Runner(cfg=cfg, secrets=secrets, db=db, worker=worker)
-    triage_agent = TriageAgent(cfg=cfg, secrets=secrets, db=db)
+    if cfg.features.scout_enabled:
+        from vibefairy.agents.scout import Scout
+        from vibefairy.agents.analyst import Analyst
+        from vibefairy.agents.advisor import Advisor
+        from vibefairy.agents.runner import Runner
 
-    # Wire scout notification → bot broadcast
-    async def _scout_notify(text: str) -> None:
-        await bot.broadcast(text)
+        scout = Scout(cfg=cfg, secrets=secrets, db=db)
+        analyst = Analyst(cfg=cfg, secrets=secrets, db=db)
+        advisor = Advisor(cfg=cfg, secrets=secrets, db=db)
+        runner = Runner(cfg=cfg, secrets=secrets, db=db, worker=worker)
 
-    scout.add_notify_callback(_scout_notify)
+        # Wire scout notification → bot broadcast
+        async def _scout_notify(text: str) -> None:
+            await bot.broadcast(text)
 
-    # Wire bot scout trigger → scout.run_round
-    async def _trigger_scout() -> None:
-        await scout.run_round()
+        scout.add_notify_callback(_scout_notify)
 
-    bot.set_scout_trigger(_trigger_scout)
+        # Wire bot scout trigger → scout.run_round
+        async def _trigger_scout() -> None:
+            await scout.run_round()
 
-    # Wire triage agent → bot (inline triage on message receipt)
-    bot.set_triage_fn(triage_agent.process_task)
+        bot.set_scout_trigger(_trigger_scout)
+        logger.info("Scout agent enabled")
+    else:
+        logger.info("Scout agent disabled (features.scout_enabled = false)")
+
+    if cfg.features.triage_auto:
+        from vibefairy.agents.triage import TriageAgent
+        triage_agent = TriageAgent(cfg=cfg, secrets=secrets, db=db)
+        bot.set_triage_fn(triage_agent.process_task)
+        logger.info("Triage auto enabled")
+    else:
+        logger.info("Triage auto disabled (features.triage_auto = false) — session mode active")
+
+    # Wire backend switch → worker + persist
+    async def _switch_backend(backend: CLIBackend) -> None:
+        worker.set_backend(backend)
+        save_backend(backend)
+        logger.info("CLI backend switched to %s", backend.display_name)
+        await repo.log_event(
+            db, "backend_switch", source="telegram",
+            detail=f"switched to {backend.value}",
+        )
+
+    bot.set_switch_fn(_switch_backend)
+
+    # Wire config reload
+    async def _reload_config() -> None:
+        nonlocal cfg
+        try:
+            new_cfg = load_config(config_path=config_path, env_path=env_path)
+            cfg = new_cfg
+            bot._cfg = new_cfg
+            worker._cfg = new_cfg
+            policy._cfg = new_cfg
+            logger.info("Config reloaded")
+            await repo.log_event(db, "config_reload", source="daemon", detail="config reloaded via /reload")
+        except Exception as e:
+            logger.error("Config reload failed: %s", e)
+            raise
+
+    bot.set_reload_fn(_reload_config)
 
     # 8. Scheduler
     scheduler = Scheduler()
 
-    scheduler.add_interval(
-        name="scout",
-        coro_factory=scout.run_round,
-        interval_secs=cfg.scout_interval_secs,
-        run_immediately=False,
-    )
+    if cfg.features.scout_enabled and scout is not None:
+        scheduler.add_interval(
+            name="scout",
+            coro_factory=scout.run_round,
+            interval_secs=cfg.scout_interval_secs,
+            run_immediately=False,
+        )
 
     scheduler.add_interval(
         name="cleanup_locks",
@@ -291,13 +352,14 @@ async def run_daemon(
         interval_secs=300,  # every 5 minutes
     )
 
-    # Periodic triage queue scan — claims tasks not yet handled inline
-    scheduler.add_interval(
-        name="triage_queue",
-        coro_factory=triage_agent.process_pending_queue,
-        interval_secs=cfg.triage.queue_scan_interval_secs,
-        run_immediately=False,
-    )
+    if cfg.features.triage_auto and triage_agent is not None:
+        # Periodic triage queue scan — claims tasks not yet handled inline
+        scheduler.add_interval(
+            name="triage_queue",
+            coro_factory=triage_agent.process_pending_queue,
+            interval_secs=cfg.triage.queue_scan_interval_secs,
+            run_immediately=False,
+        )
 
     scheduler.add_daily(
         name="daily_report",
@@ -313,15 +375,21 @@ async def run_daemon(
     logger.info("Scheduler started")
 
     # Log startup event
-    await repo.log_event(db, "daemon_start", source="daemon", detail="ClaudeFairy V2 started")
+    await repo.log_event(db, "daemon_start", source="daemon", detail="VibeFairy started")
 
-    # Send startup notification to all chats
-    target_names = [t.name for t in cfg.targets]
+    # Send startup notification
+    mode_parts = []
+    if cfg.features.triage_auto:
+        mode_parts.append("分诊模式")
+    else:
+        mode_parts.append(f"会话模式 (默认后端: {cfg.session.default_backend})")
+    if cfg.features.scout_enabled:
+        mode_parts.append(f"Scout: 每 {cfg.scout_interval_secs}s")
+
     await bot.broadcast(
-        f"ClaudeFairy V2 online.\n"
-        f"Targets: {', '.join(target_names) if target_names else 'none'}\n"
-        f"Scout interval: {cfg.scout_interval_secs}s\n"
-        f"Daily report: {cfg.daily_report_time}"
+        f"VibeFairy online.\n"
+        f"模式: {' | '.join(mode_parts)}\n"
+        f"日报: {cfg.daily_report_time}"
     )
 
     # 10. Run until signal
@@ -350,4 +418,4 @@ async def run_daemon(
     await bot.stop()
     await repo.log_event(db, "daemon_stop", source="daemon", detail="graceful shutdown")
     await db.close()
-    logger.info("ClaudeFairy V2 stopped.")
+    logger.info("VibeFairy V2 stopped.")

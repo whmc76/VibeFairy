@@ -20,12 +20,14 @@ from dataclasses import dataclass
 
 import aiosqlite
 
-from claudefairy.config.loader import DaemonConfig
-from claudefairy.config.secrets import Secrets
-from claudefairy.engine.claude_session import ClaudeSession
-from claudefairy.engine.policy import ExecutionMode, PolicyEngine
-from claudefairy.memory import repo
-from claudefairy.memory.models import Improvement, Run
+from vibefairy.config.loader import DaemonConfig
+from vibefairy.config.secrets import Secrets
+from vibefairy.engine.cli_backend import CLIBackend
+from vibefairy.engine.claude_session import ClaudeSession
+from vibefairy.engine.codex_session import CodexSession
+from vibefairy.engine.policy import ExecutionMode, PolicyEngine
+from vibefairy.memory import repo
+from vibefairy.memory.models import Improvement, Run
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +59,20 @@ class Worker:
         secrets: Secrets,
         db: aiosqlite.Connection,
         policy: PolicyEngine,
+        backend: CLIBackend = CLIBackend.CLAUDE,
     ):
         self._cfg = cfg
         self._secrets = secrets
         self._db = db
         self._policy = policy
+        self._backend: CLIBackend = backend
+
+    @property
+    def backend(self) -> CLIBackend:
+        return self._backend
+
+    def set_backend(self, backend: CLIBackend) -> None:
+        self._backend = backend
 
     async def execute(self, task: WorkerTask) -> WorkerResult:
         """Execute a task with retry + dead-letter logic."""
@@ -197,7 +208,34 @@ class Worker:
 
         await repo.update_run(self._db, run_id, status="executing")
 
-        session = ClaudeSession(working_dir=target_path)
+        # Auth pre-check
+        if self._backend == CLIBackend.CODEX:
+            auth_ok, auth_reason = await CodexSession.check_auth_available()
+        else:
+            auth_ok, auth_reason = await ClaudeSession.check_auth_available()
+
+        if not auth_ok:
+            logger.warning("Auth pre-check failed for %s: %s", self._backend.value, auth_reason)
+            await repo.update_run(self._db, run_id, status="failed", output_summary=auth_reason)
+            return WorkerResult(
+                run_id=run_id,
+                success=False,
+                output=auth_reason,
+                token_count=0,
+                duration_secs=0,
+                exit_code=1,
+                mode=task.requested_mode,
+                error=auth_reason,
+            )
+
+        if self._backend == CLIBackend.CODEX:
+            session = CodexSession(
+                working_dir=target_path,
+                model=self._secrets.codex_model,
+                openai_api_key=self._secrets.openai_api_key,
+            )
+        else:
+            session = ClaudeSession(working_dir=target_path)
 
         start = time.monotonic()
         try:

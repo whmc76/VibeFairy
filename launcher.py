@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-ClaudeFairy V2 — GUI 启动器
+VibeFairy — GUI 启动器
 
-双击即用，风格与矩阵信使一致。
-支持在 GUI 里切换任意项目目录，启动前自动写入 claudefairy.toml。
+双击即用。支持在 GUI 里切换项目目录和 AI 后端。
+daemon 运行时通过 Telegram Bot API 发送命令实现热切换，无需重启。
 
-依赖: 仅 Python 标准库 (tkinter, subprocess, threading, queue, tomllib)
+依赖: 仅 Python 标准库 (tkinter, subprocess, threading, queue, tomllib, urllib)
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import urllib.parse
+import urllib.request
 from tkinter import filedialog, messagebox, scrolledtext
 from datetime import datetime
 from pathlib import Path
@@ -35,10 +37,11 @@ except ImportError:
 
 # ── 路径 ─────────────────────────────────────────────────────────────────────
 PROJECT_DIR = Path(__file__).parent.resolve()
-PYTHON      = sys.executable
-CLAUDEFAIRY   = [PYTHON, "-m", "claudefairy", "run"]
-TOML_PATH   = PROJECT_DIR / "claudefairy.toml"
-TOML_EXAMPLE= PROJECT_DIR / "claudefairy.toml.example"
+_venv_python = PROJECT_DIR / ".venv" / "Scripts" / "python.exe"
+PYTHON      = str(_venv_python) if _venv_python.exists() else sys.executable
+VIBEFAIRY   = [PYTHON, "-m", "vibefairy", "run"]
+TOML_PATH   = PROJECT_DIR / "vibefairy.toml"
+TOML_EXAMPLE= PROJECT_DIR / "vibefairy.toml.example"
 
 # ── 颜色 ─────────────────────────────────────────────────────────────────────
 GREEN  = "#4CAF50"
@@ -64,10 +67,76 @@ def _acquire_single_instance() -> bool:
         return False
 
 
+# ── .env 读写 ─────────────────────────────────────────────────────────────────
+
+_ENV_FIELDS = [
+    ("TELEGRAM_BOT_TOKEN",        "Bot Token",              False),
+    ("TELEGRAM_ALLOWED_CHAT_IDS", "允许的 Chat ID（逗号分隔）",  False),
+    ("ANTHROPIC_API_KEY",         "Anthropic API Key（可选）",  False),
+    ("OPENAI_API_KEY",            "OpenAI API Key（Codex用）",  False),
+    ("CODEX_MODEL",               "Codex 模型（可选）",          False),
+    ("GITHUB_TOKEN",              "GitHub Token（可选）",       False),
+    ("HTTP_PROXY",                "HTTP 代理（可选）",           False),
+    ("HTTPS_PROXY",               "HTTPS 代理（可选）",          False),
+]
+
+
+def _read_env() -> dict[str, str]:
+    """解析 .env 文件，返回 key→value 字典（跳过注释和空行）。"""
+    env_path = PROJECT_DIR / ".env"
+    result: dict[str, str] = {}
+    if not env_path.exists():
+        return result
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            k, _, v = line.partition("=")
+            result[k.strip()] = v.strip()
+    return result
+
+
+def _write_env(values: dict[str, str]) -> None:
+    """把 values 写入 .env，保留注释行，新增/更新 key=value 行。"""
+    env_path = PROJECT_DIR / ".env"
+    example_path = PROJECT_DIR / ".env.example"
+
+    # 如果 .env 不存在，从 example 复制
+    if not env_path.exists() and example_path.exists():
+        env_path.write_text(example_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    existing = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    lines = existing.splitlines()
+    written: set[str] = set()
+    new_lines: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            k = stripped.partition("=")[0].strip()
+            if k in values:
+                val = values[k]
+                if val:
+                    new_lines.append(f"{k}={val}")
+                else:
+                    new_lines.append(f"# {k}=")
+                written.add(k)
+                continue
+        new_lines.append(line)
+
+    # 追加还没出现过的 key
+    for k, v in values.items():
+        if k not in written and v:
+            new_lines.append(f"{k}={v}")
+
+    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+
 # ── TOML 读写 ─────────────────────────────────────────────────────────────────
 
 def _read_toml() -> dict:
-    """读取 claudefairy.toml，失败时返回空 dict。"""
+    """读取 vibefairy.toml，失败时返回空 dict。"""
     if tomllib is None:
         return {}
     src = TOML_PATH if TOML_PATH.exists() else TOML_EXAMPLE
@@ -90,7 +159,7 @@ def _current_target_path() -> str:
 
 
 def _write_target_toml(target_path: str) -> None:
-    """把选择的目录写入 claudefairy.toml 的 targets 部分。
+    """把选择的目录写入 vibefairy.toml 的 targets 部分。
 
     策略：读取现有 toml（或 example），只替换 [[targets.projects]] 块，
     其余设置（budget/scout/retry/triage/notification 等）保持不变。
@@ -115,6 +184,27 @@ def _write_target_toml(target_path: str) -> None:
 
     # 序列化成 TOML（手写，只覆盖 targets 块，其余保留原文）
     _patch_toml_targets(TOML_PATH, name, path_str)
+
+
+# ── CLI 后端读写 ───────────────────────────────────────────────────────────────
+
+_BACKEND_FILE = PROJECT_DIR / "data" / "cli_backend"
+_VALID_BACKENDS = {"claude", "codex"}
+
+
+def _read_backend() -> str:
+    """读取 data/cli_backend，返回 'claude' 或 'codex'，默认 'claude'。"""
+    try:
+        val = _BACKEND_FILE.read_text(encoding="utf-8").strip().lower()
+        return val if val in _VALID_BACKENDS else "claude"
+    except Exception:
+        return "claude"
+
+
+def _write_backend(value: str) -> None:
+    """把 'claude' 或 'codex' 写入 data/cli_backend。"""
+    _BACKEND_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _BACKEND_FILE.write_text(value, encoding="utf-8")
 
 
 def _patch_toml_targets(toml_path: Path, name: str, path_str: str) -> None:
@@ -159,7 +249,7 @@ def _minimal_toml() -> str:
 [daemon]
 log_level = "info"
 log_dir = "data/logs"
-db_path = "data/claudefairy.db"
+db_path = "data/vibefairy.db"
 scout_interval_secs = 3600
 daily_report_time = "09:00"
 
@@ -185,13 +275,62 @@ queue_scan_interval_secs = 60
 [notification]
 quiet_hours_start = "23:00"
 quiet_hours_end = "08:00"
+
+[features]
+scout_enabled = false
+triage_auto = false
+
+[session]
+default_backend = "claude"
+default_model = "claude-sonnet-4-6"
+streaming_edit_interval_secs = 2.0
+max_message_length = 4000
 """
+
+
+# ── Telegram 命令发送（运行时热切换）─────────────────────────────────────────────
+
+def _send_telegram_command(command: str) -> bool:
+    """向所有已配置的 chat 发送 Telegram 命令（用于运行时热切换）。
+
+    读取 .env 中的 TELEGRAM_BOT_TOKEN 和 TELEGRAM_ALLOWED_CHAT_IDS。
+    静默失败 — 不抛出异常。返回 True 表示至少有一条消息发送成功。
+    """
+    env = _read_env()
+    token = env.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_ids_raw = env.get("TELEGRAM_ALLOWED_CHAT_IDS", "").strip()
+    if not token or not chat_ids_raw:
+        return False
+
+    chat_ids = [c.strip() for c in chat_ids_raw.split(",") if c.strip()]
+    if not chat_ids:
+        return False
+
+    success = False
+    for chat_id in chat_ids:
+        try:
+            payload = json.dumps({
+                "chat_id": chat_id,
+                "text": command,
+            }).encode("utf-8")
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            req = urllib.request.Request(
+                url, data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    success = True
+        except Exception:
+            pass
+    return success
 
 
 # ── DaemonRunner ──────────────────────────────────────────────────────────────
 
 class DaemonRunner:
-    """管理 ClaudeFairy daemon 子进程，把日志推进 log_queue。"""
+    """管理 VibeFairy daemon 子进程，把日志推进 log_queue。"""
 
     def __init__(self, log_queue: queue.Queue, status_cb):
         self._log_queue  = log_queue
@@ -263,19 +402,19 @@ class DaemonRunner:
             _write_target_toml(target_path)
             self._log(f"[配置] 工作目录已设为: {target_path}")
         except Exception as e:
-            self._log(f"[错误] 无法写入 claudefairy.toml: {e}")
+            self._log(f"[错误] 无法写入 vibefairy.toml: {e}")
             return False
 
         (PROJECT_DIR / "data" / "logs").mkdir(parents=True, exist_ok=True)
 
-        self._log("正在启动 ClaudeFairy daemon...")
+        self._log("正在启动 VibeFairy daemon...")
         self._bot_ok   = None
         self._sched_ok = None
         self._push_status()
 
         try:
             self._proc = subprocess.Popen(
-                CLAUDEFAIRY,
+                VIBEFAIRY,
                 cwd=str(PROJECT_DIR),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -313,12 +452,107 @@ class DaemonRunner:
         return self._running
 
 
-# ── ClaudeFairyApp (GUI) ────────────────────────────────────────────────────────
+# ── BotConfigDialog ───────────────────────────────────────────────────────────
 
-class ClaudeFairyApp(tk.Tk):
+class BotConfigDialog(tk.Toplevel):
+    """弹出式 Bot 配置对话框，读写 .env 文件。"""
+
+    def __init__(self, parent: tk.Tk):
+        super().__init__(parent)
+        self.title("Bot 配置")
+        self.configure(bg="#1a1a2e")
+        self.resizable(False, False)
+        self.grab_set()  # 模态
+
+        self._vars: dict[str, tk.StringVar] = {}
+        current = _read_env()
+
+        pad = {"padx": 12, "pady": 4}
+
+        tk.Label(
+            self, text="Bot 绑定配置  ·  写入 .env 文件",
+            bg="#1a1a2e", fg="#e0e0e0", font=("Segoe UI", 10, "bold"),
+        ).pack(pady=(12, 4))
+
+        tk.Label(
+            self, text="修改后重启 Daemon 生效",
+            bg="#1a1a2e", fg="#666", font=("Segoe UI", 8),
+        ).pack(pady=(0, 8))
+
+        form = tk.Frame(self, bg="#0d1b2a", padx=16, pady=12)
+        form.pack(fill=tk.X, padx=12, pady=(0, 8))
+        form.columnconfigure(1, weight=1)
+
+        for row_idx, (key, label, _secret) in enumerate(_ENV_FIELDS):
+            tk.Label(
+                form, text=label + ":", bg="#0d1b2a", fg="#aaa",
+                font=("Segoe UI", 9), anchor="e", width=22,
+            ).grid(row=row_idx, column=0, sticky="e", **pad)
+
+            var = tk.StringVar(value=current.get(key, ""))
+            self._vars[key] = var
+
+            show = "*" if "TOKEN" in key or "KEY" in key else ""
+            entry = tk.Entry(
+                form, textvariable=var, show=show,
+                bg="#1e2d3d", fg="#e0e0e0", insertbackground="#e0e0e0",
+                relief=tk.FLAT, font=("Consolas", 9), bd=4, width=36,
+            )
+            entry.grid(row=row_idx, column=1, sticky="ew", **pad)
+
+            # TOKEN/KEY 字段加"显示/隐藏"切换
+            if show:
+                def _make_toggle(e=entry):
+                    def toggle():
+                        e.config(show="" if e.cget("show") else "*")
+                    return toggle
+                tk.Button(
+                    form, text="👁", relief=tk.FLAT, bg="#0d1b2a", fg="#888",
+                    cursor="hand2", font=("Segoe UI", 9),
+                    command=_make_toggle(),
+                ).grid(row=row_idx, column=2, padx=(0, 4))
+
+        # 按钮行
+        btn_frame = tk.Frame(self, bg="#1a1a2e", pady=8)
+        btn_frame.pack(fill=tk.X, padx=12)
+
+        tk.Button(
+            btn_frame, text="保存", width=10,
+            bg=GREEN, fg="white", relief=tk.FLAT, cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+            command=self._save,
+        ).pack(side=tk.RIGHT, padx=(6, 0))
+
+        tk.Button(
+            btn_frame, text="取消", width=8,
+            bg="#37474f", fg="white", relief=tk.FLAT, cursor="hand2",
+            font=("Segoe UI", 9),
+            command=self.destroy,
+        ).pack(side=tk.RIGHT)
+
+        # 居中显示
+        self.update_idletasks()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        px, py = parent.winfo_x(), parent.winfo_y()
+        w, h = self.winfo_width(), self.winfo_height()
+        self.geometry(f"+{px + (pw - w) // 2}+{py + (ph - h) // 2}")
+
+    def _save(self) -> None:
+        values = {k: v.get().strip() for k, v in self._vars.items()}
+        try:
+            _write_env(values)
+            messagebox.showinfo("VibeFairy", "配置已保存到 .env\n重启 Daemon 后生效。", parent=self)
+            self.destroy()
+        except Exception as e:
+            messagebox.showerror("VibeFairy", f"保存失败:\n{e}", parent=self)
+
+
+# ── VibeFairyApp (GUI) ────────────────────────────────────────────────────────
+
+class VibeFairyApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("ClaudeFairy V2  ·  AI 守护进程")
+        self.title("VibeFairy  ·  AI 远程终端")
         self.resizable(True, True)
         self.minsize(560, 420)
         self.configure(bg="#1a1a2e")
@@ -332,6 +566,9 @@ class ClaudeFairyApp(tk.Tk):
         initial_path = _current_target_path() or str(Path.home())
         self._workdir_var = tk.StringVar(value=initial_path)
 
+        # CLI 后端变量（从 data/cli_backend 初始化）
+        self._backend_var = tk.StringVar(value=_read_backend())
+
         self._build_ui()
         self._poll_queue()
 
@@ -342,11 +579,11 @@ class ClaudeFairyApp(tk.Tk):
         title_bar = tk.Frame(self, bg="#1a1a2e", pady=8)
         title_bar.pack(fill=tk.X)
         tk.Label(
-            title_bar, text="ClaudeFairy V2  ·  AI 守护进程",
+            title_bar, text="VibeFairy  ·  AI 远程终端",
             bg="#1a1a2e", fg="#e0e0e0", font=("Segoe UI", 12, "bold"),
         ).pack()
         tk.Label(
-            title_bar, text="消息即任务  ·  自动分拣  ·  按钮审批  ·  安全执行",
+            title_bar, text="通过 Telegram 远程控制 Claude Code / Codex",
             bg="#1a1a2e", fg="#555", font=("Segoe UI", 8),
         ).pack()
 
@@ -376,6 +613,34 @@ class ClaudeFairyApp(tk.Tk):
             command=self._browse_workdir,
         )
         self._browse_btn.grid(row=0, column=2, padx=(6, 0))
+
+        # ── 后端切换行 ────────────────────────────────────────────────────
+        tk.Label(cfg_frame, text="执行后端:", bg="#0d1b2a", fg="#aaa",
+                 font=("Segoe UI", 9), anchor="w").grid(
+            row=1, column=0, sticky="w", padx=(0, 8), pady=(4, 0))
+
+        backend_row = tk.Frame(cfg_frame, bg="#0d1b2a")
+        backend_row.grid(row=1, column=1, columnspan=2, sticky="w", pady=(4, 0))
+
+        self._radio_claude = tk.Radiobutton(
+            backend_row, text="Claude Code", variable=self._backend_var,
+            value="claude", bg="#0d1b2a", fg="#e0e0e0",
+            selectcolor="#1e2d3d", activebackground="#0d1b2a",
+            activeforeground="#e0e0e0", relief=tk.FLAT, cursor="hand2",
+            font=("Segoe UI", 9),
+            command=self._on_backend_change,
+        )
+        self._radio_claude.pack(side=tk.LEFT, padx=(0, 12))
+
+        self._radio_codex = tk.Radiobutton(
+            backend_row, text="OpenAI Codex", variable=self._backend_var,
+            value="codex", bg="#0d1b2a", fg="#e0e0e0",
+            selectcolor="#1e2d3d", activebackground="#0d1b2a",
+            activeforeground="#e0e0e0", relief=tk.FLAT, cursor="hand2",
+            font=("Segoe UI", 9),
+            command=self._on_backend_change,
+        )
+        self._radio_codex.pack(side=tk.LEFT)
 
         # ── 状态区 ────────────────────────────────────────────────────────
         sf = tk.Frame(self, bg="#16213e", pady=8, padx=14)
@@ -446,7 +711,61 @@ class ClaudeFairyApp(tk.Tk):
             command=self._open_project_dir,
         ).pack(side=tk.LEFT, padx=6)
 
-    # ── 目录选择 ──────────────────────────────────────────────────────────
+        # 运行时切换目录（初始隐藏，运行中显示）
+        self._cd_btn = tk.Button(
+            btn_frame, text="切换目录", width=10,
+            bg="#1565C0", fg="white", relief=tk.FLAT, cursor="hand2",
+            font=("Segoe UI", 9),
+            command=self._cd_runtime,
+        )
+        # 不 pack — _apply_status 负责显示/隐藏
+
+        tk.Button(
+            btn_frame, text="配置", width=10,
+            bg="#455a64", fg="white", relief=tk.FLAT, cursor="hand2",
+            font=("Segoe UI", 9),
+            command=self._open_bot_config,
+        ).pack(side=tk.RIGHT, padx=8)
+
+    # ── 后端切换 ──────────────────────────────────────────────────────────
+
+    def _on_backend_change(self) -> None:
+        val = self._backend_var.get()
+        _write_backend(val)
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._log_queue.put((ts, f"[配置] 执行后端已切换为: {val}"))
+
+        # 如果 daemon 正在运行，通过 Telegram 热切换后端
+        if self._runner and self._runner.is_running:
+            cmd = f"/backend {val}"
+            ok = _send_telegram_command(cmd)
+            if ok:
+                self._log_queue.put((ts, f"[Telegram] 已发送 {cmd}"))
+            else:
+                self._log_queue.put((ts, f"[提示] 无法发送 Telegram 命令（检查 .env 配置）"))
+
+    # ── 目录选择 / 运行时切换 ────────────────────────────────────────────
+
+    def _cd_runtime(self) -> None:
+        """运行时切换目录：选择新目录后通过 Telegram /cd 命令热切换。"""
+        current = self._workdir_var.get()
+        initial = current if Path(current).is_dir() else str(Path.home())
+        chosen = filedialog.askdirectory(
+            title="选择新的工作目录（通过 Telegram /cd 热切换）",
+            initialdir=initial,
+            mustexist=True,
+        )
+        if not chosen:
+            return
+        path_str = str(Path(chosen)).replace("\\", "/")
+        cmd = f"/cd {path_str}"
+        ts = datetime.now().strftime("%H:%M:%S")
+        ok = _send_telegram_command(cmd)
+        if ok:
+            self._workdir_var.set(chosen)
+            self._log_queue.put((ts, f"[Telegram] 已发送 {cmd}"))
+        else:
+            self._log_queue.put((ts, "[错误] 无法发送 Telegram 命令（检查 .env 配置）"))
 
     def _browse_workdir(self) -> None:
         current = self._workdir_var.get()
@@ -518,11 +837,16 @@ class ClaudeFairyApp(tk.Tk):
         running = self._runner and self._runner.is_running
         self._toggle_btn.config(text="停止" if running else "启动",
                                 bg=RED      if running else GREEN)
-        # 运行中禁止更改目录
-        state = tk.DISABLED if running else tk.NORMAL
-        self._dir_entry.config(state=state)
-        self._browse_btn.config(state=state)
-        self.title("ClaudeFairy V2  ·  " + ("运行中" if running else "已停止"))
+        # 运行中禁止更改目录（需要通过按钮热切换），但后端可以实时切换
+        dir_state = tk.DISABLED if running else tk.NORMAL
+        self._dir_entry.config(state=dir_state)
+        self._browse_btn.config(state=dir_state)
+        # 切换目录按钮：未运行时隐藏，运行中显示
+        if running:
+            self._cd_btn.pack(side=tk.LEFT, padx=6)
+        else:
+            self._cd_btn.pack_forget()
+        self.title("VibeFairy  ·  " + ("运行中" if running else "已停止"))
 
     # ── 控制 ──────────────────────────────────────────────────────────────
 
@@ -535,10 +859,10 @@ class ClaudeFairyApp(tk.Tk):
     def _start_daemon(self) -> None:
         target = self._workdir_var.get().strip()
         if not target:
-            messagebox.showwarning("ClaudeFairy", "请先选择项目目录")
+            messagebox.showwarning("VibeFairy", "请先选择项目目录")
             return
         if not Path(target).is_dir():
-            messagebox.showerror("ClaudeFairy", f"目录不存在:\n{target}")
+            messagebox.showerror("VibeFairy", f"目录不存在:\n{target}")
             return
 
         self._toggle_btn.config(state=tk.DISABLED)
@@ -556,6 +880,9 @@ class ClaudeFairyApp(tk.Tk):
         self._apply_status(False, False)
 
     # ── 辅助 ──────────────────────────────────────────────────────────────
+
+    def _open_bot_config(self) -> None:
+        BotConfigDialog(self)
 
     def _open_log_dir(self) -> None:
         d = PROJECT_DIR / "data" / "logs"
@@ -580,13 +907,13 @@ def main() -> None:
         root = tk.Tk()
         root.withdraw()
         messagebox.showerror(
-            "ClaudeFairy",
-            "ClaudeFairy 启动器已在运行中！\n\n请先关闭已打开的窗口，再重新启动。"
+            "VibeFairy",
+            "VibeFairy 启动器已在运行中！\n\n请先关闭已打开的窗口，再重新启动。"
         )
         root.destroy()
         return
 
-    app = ClaudeFairyApp()
+    app = VibeFairyApp()
     app.after(300, app._start_daemon)
     app.mainloop()
 

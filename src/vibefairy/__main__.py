@@ -1,4 +1,4 @@
-"""Entry point: python -m claudefairy or claudefairy CLI."""
+"""Entry point: python -m vibefairy or vibefairy CLI."""
 
 import asyncio
 import argparse
@@ -9,14 +9,14 @@ from pathlib import Path
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="claudefairy",
-        description="ClaudeFairy V2 — Secure Autonomous AI Assistant Daemon",
+        prog="vibefairy",
+        description="VibeFairy V2 — Secure Autonomous AI Assistant Daemon",
     )
     p.add_argument(
         "--config",
         type=Path,
         default=None,
-        help="Path to claudefairy.toml (default: ./claudefairy.toml)",
+        help="Path to vibefairy.toml (default: ./vibefairy.toml)",
     )
     p.add_argument(
         "--env",
@@ -42,11 +42,11 @@ def main() -> None:
 
     # Default command is "run"
     if args.command is None or args.command == "run":
-        from claudefairy.daemon import run_daemon
+        from vibefairy.daemon import run_daemon
         asyncio.run(run_daemon(config_path=args.config, env_path=args.env, log_level=args.log_level))
     elif args.command == "check":
-        from claudefairy.config.loader import load_config
-        from claudefairy.config.secrets import load_secrets
+        from vibefairy.config.loader import load_config
+        from vibefairy.config.secrets import load_secrets
         try:
             env_path = args.env or Path(".env")
             cfg = load_config(config_path=args.config, env_path=env_path)

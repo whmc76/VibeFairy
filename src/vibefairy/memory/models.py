@@ -86,6 +86,41 @@ class Lock:
 
 
 @dataclass
+class Session:
+    """A persistent conversation session with an AI backend.
+
+    Each session is tied to a chat_id, a working directory, and a backend.
+    session_id stores the Claude Code SDK session ID for context continuation.
+
+    Status flow: active → paused (on crash) | closed (on /close)
+    """
+
+    id: int | None
+    name: str
+    chat_id: str
+    working_dir: str
+    backend: str = "claude"          # claude | codex
+    model: str | None = None
+    session_id: str | None = None    # Claude Code SDK session_id for context continuation
+    status: str = "active"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass
+class SessionMessage:
+    """A message exchanged within a Session."""
+
+    id: int | None
+    session_id: int
+    role: str                        # user | assistant | system
+    content: str
+    token_count: int = 0
+    telegram_message_id: int | None = None
+    created_at: datetime | None = None
+
+
+@dataclass
 class Task:
     """User message converted into a tracked task.
 

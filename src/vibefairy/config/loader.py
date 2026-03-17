@@ -1,8 +1,8 @@
-"""Config loader — reads claudefairy.toml + .env.
+"""Config loader — reads vibefairy.toml + .env.
 
 Responsibilities:
 - Load .env via python-dotenv (populates os.environ BEFORE secrets.py)
-- Parse claudefairy.toml (tomli) into a typed DaemonConfig
+- Parse vibefairy.toml (tomli) into a typed DaemonConfig
 - Provide sane defaults for optional fields
 """
 
@@ -74,10 +74,30 @@ class NotificationConfig:
 
 
 @dataclass
+class AuthConfig:
+    login_timeout_secs: int = 300
+    status_cache_secs: int = 60
+
+
+@dataclass
+class FeaturesConfig:
+    scout_enabled: bool = False      # Enable Scout discovery pipeline
+    triage_auto: bool = False        # True = old triage-on-every-message; False = session mode
+
+
+@dataclass
+class SessionConfig:
+    default_backend: str = "claude"              # claude | codex
+    default_model: str = "claude-sonnet-4-6"
+    streaming_edit_interval_secs: float = 2.0    # min seconds between Telegram message edits
+    max_message_length: int = 4000               # chars; longer responses are split
+
+
+@dataclass
 class DaemonConfig:
     log_level: str = "info"
     log_dir: str = "data/logs"
-    db_path: str = "data/claudefairy.db"
+    db_path: str = "data/vibefairy.db"
     scout_interval_secs: int = 3600
     daily_report_time: str = "09:00"
     targets: list[TargetProject] = field(default_factory=list)
@@ -86,6 +106,9 @@ class DaemonConfig:
     retry: RetryConfig = field(default_factory=RetryConfig)
     triage: TriageConfig = field(default_factory=TriageConfig)
     notification: NotificationConfig = field(default_factory=NotificationConfig)
+    auth: AuthConfig = field(default_factory=AuthConfig)
+    features: FeaturesConfig = field(default_factory=FeaturesConfig)
+    session: SessionConfig = field(default_factory=SessionConfig)
     lock_ttl_minutes: int = 60
     approval_default_ttl_minutes: int = 30
 
@@ -94,7 +117,7 @@ def load_config(
     config_path: Path | None = None,
     env_path: Path | None = None,
 ) -> DaemonConfig:
-    """Load .env (into os.environ) then parse claudefairy.toml."""
+    """Load .env (into os.environ) then parse vibefairy.toml."""
 
     # 1. Load .env first so secrets are available
     env_file = env_path or Path(".env")
@@ -102,10 +125,10 @@ def load_config(
         load_dotenv(env_file, override=False)
 
     # 2. Find config file
-    toml_path = config_path or Path("claudefairy.toml")
+    toml_path = config_path or Path("vibefairy.toml")
     if not toml_path.exists():
         # Fall back to looking next to the package root
-        candidate = Path(__file__).parent.parent.parent.parent / "claudefairy.toml"
+        candidate = Path(__file__).parent.parent.parent.parent / "vibefairy.toml"
         if candidate.exists():
             toml_path = candidate
 
@@ -119,7 +142,7 @@ def load_config(
     cfg = DaemonConfig(
         log_level=daemon_raw.get("log_level", "info"),
         log_dir=daemon_raw.get("log_dir", "data/logs"),
-        db_path=daemon_raw.get("db_path", "data/claudefairy.db"),
+        db_path=daemon_raw.get("db_path", "data/vibefairy.db"),
         scout_interval_secs=daemon_raw.get("scout_interval_secs", 3600),
         daily_report_time=daemon_raw.get("daily_report_time", "09:00"),
     )
@@ -187,6 +210,29 @@ def load_config(
     cfg.notification = NotificationConfig(
         quiet_hours_start=n.get("quiet_hours_start", "23:00"),
         quiet_hours_end=n.get("quiet_hours_end", "08:00"),
+    )
+
+    # Auth
+    a = raw.get("auth", {})
+    cfg.auth = AuthConfig(
+        login_timeout_secs=a.get("login_timeout_secs", 300),
+        status_cache_secs=a.get("status_cache_secs", 60),
+    )
+
+    # Features
+    f = raw.get("features", {})
+    cfg.features = FeaturesConfig(
+        scout_enabled=f.get("scout_enabled", False),
+        triage_auto=f.get("triage_auto", False),
+    )
+
+    # Session
+    s = raw.get("session", {})
+    cfg.session = SessionConfig(
+        default_backend=s.get("default_backend", "claude"),
+        default_model=s.get("default_model", "claude-sonnet-4-6"),
+        streaming_edit_interval_secs=s.get("streaming_edit_interval_secs", 2.0),
+        max_message_length=s.get("max_message_length", 4000),
     )
 
     return cfg

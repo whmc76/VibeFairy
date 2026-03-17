@@ -13,12 +13,12 @@ import logging
 
 import aiosqlite
 
-from claudefairy.config.loader import DaemonConfig
-from claudefairy.config.secrets import Secrets
-from claudefairy.engine.policy import ExecutionMode
-from claudefairy.engine.worker import Worker, WorkerResult, WorkerTask
-from claudefairy.memory import repo
-from claudefairy.memory.models import Improvement
+from vibefairy.config.loader import DaemonConfig
+from vibefairy.config.secrets import Secrets
+from vibefairy.engine.policy import ExecutionMode
+from vibefairy.engine.worker import Worker, WorkerResult, WorkerTask
+from vibefairy.memory import repo
+from vibefairy.memory.models import Improvement
 
 logger = logging.getLogger(__name__)
 

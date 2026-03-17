@@ -17,8 +17,8 @@ from enum import Enum
 
 import aiosqlite
 
-from claudefairy.config.loader import BudgetConfig, DaemonConfig
-from claudefairy.memory import repo
+from vibefairy.config.loader import BudgetConfig, DaemonConfig
+from vibefairy.memory import repo
 
 logger = logging.getLogger(__name__)
 
